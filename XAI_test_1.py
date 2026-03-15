@@ -5,6 +5,7 @@ import shap
 import matplotlib.pyplot as plt
 import statsmodels.api as sm
 from sklearn.model_selection import train_test_split
+from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 
 def generate_linear_synthetic_data(num_inputs: int = 10, num_samples: int = 5000, 
                             num_contributing_features: tuple[int, int] = (2, 5), 
@@ -265,6 +266,26 @@ def train_xgb_model(X: pd.DataFrame, y: np.ndarray, test_size: float = 0.2, rand
     
     return model, X_train, X_test
 
+def evaluate_xgb_model(model: xgb.XGBRegressor, X_test: pd.DataFrame, y_test: np.ndarray) -> None:
+    """Evaluates the XGBoost model and prints regression metrics."""
+    print("\n--- XGBoost Model Evaluation ---")
+    
+    # Generate predictions on the unseen test data
+    y_pred = model.predict(X_test)
+    
+    # Calculate metrics
+    mse = mean_squared_error(y_test, y_pred)
+    rmse = np.sqrt(mse)
+    mae = mean_absolute_error(y_test, y_pred)
+    r2 = r2_score(y_test, y_pred)
+    
+    # Print results
+    print(f"Mean Squared Error (MSE):       {mse:.4f}")
+    print(f"Root Mean Squared Error (RMSE): {rmse:.4f}")
+    print(f"Mean Absolute Error (MAE):      {mae:.4f}")
+    print(f"R-squared Score:                {r2:.4f}")
+    print("--------------------------------\n")
+
 def plot_all_xgb_importances(model: xgb.XGBRegressor, feature_names: list[str]) -> None:
     """Plots Weight, Gain, and Cover importance metrics side-by-side."""
     booster = model.get_booster()
@@ -454,6 +475,8 @@ def main():
     # We pass the pre-split data directly to ensure apples-to-apples comparison
     model = xgb.XGBRegressor(n_estimators=100, max_depth=3, learning_rate=0.1)
     model.fit(X_train, y_train)
+    # Evaluate the XGBoost Model on the test set
+    evaluate_xgb_model(model, X_test, y_test)
     
     # 4. XGBoost Native Importances
     plot_all_xgb_importances(model, feature_names)
