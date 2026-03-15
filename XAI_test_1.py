@@ -95,7 +95,8 @@ def generate_synthetic_data_with_interactions(num_inputs: int = 10, num_samples:
     
     return X, y, feature_names
 
-def perform_traditional_regression(X_train, y_train):
+def perform_traditional_regression(X_train: pd.DataFrame, y_train: np.ndarray, 
+                                   ) -> sm.regression.linear_model.RegressionResultsWrapper:
     """Performs traditional OLS regression to find significant features and their coefficients."""
     print("\n--- Traditional Regression Analysis (OLS) ---")
     
@@ -137,7 +138,8 @@ def perform_traditional_regression(X_train, y_train):
     
     return ols_model
 
-def train_xgb_model(X, y, test_size=0.2, random_state=42):
+def train_xgb_model(X: pd.DataFrame, y: np.ndarray, test_size: float = 0.2, random_state: int = 4,
+                    ) -> tuple[xgb.XGBRegressor, pd.DataFrame, pd.DataFrame]:
     """Splits data and trains a basic XGBoost Regressor."""
     X_train, X_test, y_train, y_test = train_test_split(
         X, y, test_size=test_size, random_state=random_state
@@ -148,7 +150,7 @@ def train_xgb_model(X, y, test_size=0.2, random_state=42):
     
     return model, X_train, X_test
 
-def plot_all_xgb_importances(model, feature_names):
+def plot_all_xgb_importances(model: xgb.XGBRegressor, feature_names: list[str]) -> None:
     """Plots Weight, Gain, and Cover importance metrics side-by-side."""
     booster = model.get_booster()
     metrics = ['weight', 'gain', 'cover']
@@ -171,15 +173,16 @@ def plot_all_xgb_importances(model, feature_names):
     plt.tight_layout()
     plt.show()
 
-def compute_shap_values(model, X_train, X_test, max_background_samples=100):
+def compute_shap_values(model: xgb.XGBRegressor, X_train: pd.DataFrame, X_test: pd.DataFrame, max_background_samples: int = 100) -> shap.Explanation:
     """Computes SHAP values using the training set as a background distribution."""
-    masker = shap.maskers.Independent(X_train, max_samples=max_background_samples)
-    explainer = shap.Explainer(model.predict, masker)
+    # masker = shap.maskers.Independent(X_train, max_samples=max_background_samples)
+    # explainer = shap.Explainer(model.predict, masker)
+    explainer = shap.TreeExplainer(model)
     shap_values = explainer(X_test)
     
     return shap_values
 
-def plot_shap_analysis(shap_values, feature_names):
+def plot_shap_analysis(shap_values: shap.Explanation, feature_names: list[str]) -> None:
     """Generates the beeswarm plot and detailed feature dependence plots."""
     # 1. Beeswarm Plot
     plt.figure(figsize=(10, 6))
@@ -229,7 +232,7 @@ def plot_shap_analysis(shap_values, feature_names):
         fig.tight_layout()
     plt.show()
 
-def print_feature_importance(shap_values):
+def print_feature_importance(shap_values: shap.Explanation) -> list[str]:
     """Calculates and prints global feature importance based on mean absolute SHAP values."""
     global_importances = np.abs(shap_values.values).mean(0)
     feature_importance_dict = dict(zip(shap_values.feature_names, global_importances))
@@ -246,25 +249,70 @@ def print_feature_importance(shap_values):
     
     return ranked_features
 
+def analyze_shap_interactions(model: xgb.XGBRegressor, X_test: pd.DataFrame, feature_names: list[str]) -> None:
+    """Computes True SHAP Interaction Values and plots the strongest pair."""
+    print("\n--- Computing SHAP Interaction Values ---")
+    # TreeExplainer calculates interactions directly from the tree structure
+    explainer = shap.TreeExplainer(model)
+    
+    # Output shape is (n_samples, n_features, n_features)
+    interaction_values = explainer.shap_interaction_values(X_test)
+    
+    # 1. Global Interaction Summary
+    # Pass show=False so we can attach a title before it renders
+    shap.summary_plot(interaction_values, X_test, feature_names=feature_names, max_display=len(feature_names), show=False)
+    # plt.title("SHAP Interaction Summary (Global View)")
+    # plt.tight_layout()
+    plt.show()
+    
+    # 2. Find the strongest interacting pair
+    # Take mean absolute value across all samples
+    mean_abs_interactions = np.abs(interaction_values).mean(axis=0)
+    
+    # Zero out the diagonal (which represents main effects, not interactions)
+    np.fill_diagonal(mean_abs_interactions, 0)
+    
+    # Find indices of the maximum interaction
+    idx_i, idx_j = np.unravel_index(np.argmax(mean_abs_interactions), mean_abs_interactions.shape)
+    
+    feat_i, feat_j = feature_names[idx_i], feature_names[idx_j]
+    print(f"\nStrongest Interaction found by SHAP: {feat_i} & {feat_j}")
+    
+    # 3. Plot specific dependence for the strongest interaction
+    print(f"Plotting pure interaction effect for {feat_i} and {feat_j}...")
+    
+    # Remove the invalid 'title=' argument and use show=False
+    shap.dependence_plot(
+        (idx_i, idx_j), 
+        interaction_values, 
+        X_test, 
+        feature_names=feature_names,
+        show=False
+    )
+    # Apply the title correctly via Matplotlib
+    # plt.title(f"Pure SHAP Interaction Effect: {feat_i} * {feat_j}")
+    # plt.tight_layout()
+    plt.show()
+
 def main():
     """Main execution pipeline."""
     # 1. Setup & Data
-    X, y, feature_names = generate_synthetic_data(
-        num_inputs=10, 
-        num_samples=5000, 
-        num_contributing_features=(2, 5), 
-        weight_range=(-3, 3),
-        noise_std=0.05,
-    )
-    # X, y, feature_names = generate_synthetic_data_with_interactions(
+    # X, y, feature_names = generate_synthetic_data(
     #     num_inputs=10, 
     #     num_samples=5000, 
     #     num_contributing_features=(2, 5), 
     #     weight_range=(-3, 3),
-    #     num_interactions=(1, 2),
-    #     interaction_weight_range=(-3, 3)
     #     noise_std=0.05,
     # )
+    X, y, feature_names = generate_synthetic_data_with_interactions(
+        num_inputs=10, 
+        num_samples=5000, 
+        num_contributing_features=(2, 5), 
+        weight_range=(-3, 3),
+        num_interactions=(1, 2),
+        interaction_weight_range=(-3, 3),
+        noise_std=0.05,
+    )
     
     # Split data here so both OLS and XGBoost train on the exact same subsets
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
@@ -286,7 +334,11 @@ def main():
     # 6. Visualization (SHAP)
     plot_shap_analysis(shap_values, feature_names)
     
-    # 7. Summary (SHAP)
+    # 7. Deep Dive: SHAP Interaction Analysis
+    # Note: X_test must be a DataFrame or numpy array. We use X_test directly.
+    analyze_shap_interactions(model, X_test, feature_names)
+
+    # 8. Summary (SHAP)
     ranked_features = print_feature_importance(shap_values)
 
 if __name__ == "__main__":
