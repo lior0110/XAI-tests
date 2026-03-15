@@ -6,7 +6,7 @@ import matplotlib.pyplot as plt
 import statsmodels.api as sm
 from sklearn.model_selection import train_test_split
 
-def generate_synthetic_data(num_inputs: int = 10, num_samples: int = 5000, 
+def generate_linear_synthetic_data(num_inputs: int = 10, num_samples: int = 5000, 
                             num_contributing_features: tuple[int, int] = (2, 5), 
                             weight_range: tuple[float, float] = (-3, 3), 
                             noise_std: float = 0.05, 
@@ -18,11 +18,17 @@ def generate_synthetic_data(num_inputs: int = 10, num_samples: int = 5000,
 
     # Sort features by absolute weight (contribution)
     sorted_features = sorted(zip(input_indices, weights), key=lambda x: abs(x[1]), reverse=True)
+    
+    # Build Equation String
+    equation_parts = []
+    for idx, w in sorted_features:
+        equation_parts.append(f"({w:.4f} * Feature_{idx})")
+    equation_str = "y = " + " + ".join(equation_parts) + f" + Noise(0, {noise_std})"
 
     print("--- Generative Model Info ---")
     print(f"Number of contributing variables (M): {m_inputs}")
-    for idx, w in sorted_features:
-        print(f"Feature_{idx}: weight = {w:.4f}")
+    print("\n--- True Mathematical Equation ---")
+    print(equation_str)
     print("-----------------------------\n")
 
     feature_names = [f"Feature_{i}" for i in range(num_inputs)]
@@ -62,24 +68,30 @@ def generate_synthetic_data_with_interactions(num_inputs: int = 10, num_samples:
         pair = sorted(pair) 
         interactions.append((pair[0], pair[1], weight))
 
+    sorted_interactions = sorted(interactions, key=lambda x: abs(x[2]), reverse=True)
+
+    # 3. Build Equation String
+    equation_parts = []
+    for idx, w in sorted_linear:
+        equation_parts.append(f"({w:.4f} * Feature_{idx})")
+    for i, j, w in sorted_interactions:
+        equation_parts.append(f"({w:.4f} * Feature_{i} * Feature_{j})")
+        
+    equation_str = "y = " + " + ".join(equation_parts) + f" + Noise(0, {noise_std})"
+
     # Print Truth
     print("--- Generative Model Info (With Interactions) ---")
     print(f"Number of linear variables (M): {m_inputs}")
-    for idx, w in sorted_linear:
-        print(f"  Feature_{idx}: weight = {w:.4f}")
-        
-    print(f"\nNumber of interaction terms: {num_interactions}")
-    # Sort interactions by absolute weight
-    sorted_interactions = sorted(interactions, key=lambda x: abs(x[2]), reverse=True)
-    for i, j, w in sorted_interactions:
-        print(f"  Feature_{i} * Feature_{j}: weight = {w:.4f}")
+    print(f"Number of interaction terms: {num_interactions}")
+    print("\n--- True Mathematical Equation ---")
+    print(equation_str)
     print("-------------------------------------------------\n")
 
     # Generate X
     feature_names = [f"Feature_{i}" for i in range(num_inputs)]
     X = pd.DataFrame(np.random.rand(num_samples, num_inputs), columns=feature_names)
 
-    # 3. Calculate y
+    # 4. Calculate y
     y = np.zeros(num_samples)
     
     # Add linear terms
@@ -94,6 +106,109 @@ def generate_synthetic_data_with_interactions(num_inputs: int = 10, num_samples:
     y += np.random.normal(0, noise_std, num_samples)
     
     return X, y, feature_names
+
+def generate_synthetic_data_with_hidden_features(
+    num_inputs: int = 10, 
+    num_samples: int = 5000, 
+    num_contributing_features: tuple[int, int] = (2, 5), 
+    num_hidden_features: tuple[int, int] = (1, 2), 
+    weight_range: tuple[float, float] = (-3, 3), 
+    num_interactions: tuple[int, int] = (1, 2), 
+    interaction_weight_range: tuple[float, float] = (-3, 3), 
+    noise_std: float = 0.05, 
+    hidden_in_linear: bool = True,           # NEW: Should hidden features have a linear impact?
+    hidden_in_interactions: bool = True      # NEW: Should hidden features be part of interactions?
+) -> tuple[pd.DataFrame, pd.DataFrame, np.ndarray, list[str], list[str]]:
+    """Generates synthetic data where hidden features impact 'y' based on user demand."""
+    
+    if not hidden_in_linear and not hidden_in_interactions:
+        print("WARNING: Hidden features are excluded from both linear and interaction parts. They will not impact 'y'.")
+
+    # 1. Determine counts
+    m_inputs = np.random.randint(num_contributing_features[0], num_contributing_features[1] + 1)
+    n_hidden = np.random.randint(num_hidden_features[0], num_hidden_features[1] + 1)
+    total_features = num_inputs + n_hidden
+    
+    def get_feat_name(idx):
+        return f"Feature_{idx}" if idx < num_inputs else f"Hidden_{idx - num_inputs}"
+
+    # 2. Linear components
+    visible_indices = np.random.choice(num_inputs, m_inputs, replace=False)
+    hidden_indices = np.arange(num_inputs, total_features) 
+    
+    # Apply hidden features to linear terms if requested
+    if hidden_in_linear:
+        all_contributing_indices = np.concatenate([visible_indices, hidden_indices])
+    else:
+        all_contributing_indices = visible_indices
+        
+    linear_weights = np.random.uniform(weight_range[0], weight_range[1], len(all_contributing_indices))
+    sorted_linear = sorted(zip(all_contributing_indices, linear_weights), key=lambda x: abs(x[1]), reverse=True)
+
+    # 3. Interaction components
+    n_interactions = np.random.randint(num_interactions[0], num_interactions[1] + 1)
+    interactions = []
+    
+    for i in range(n_interactions):
+        if hidden_in_interactions and i == 0 and n_hidden > 0:
+            # Force the first interaction to explicitly include a hidden feature
+            h_feat = np.random.choice(hidden_indices)
+            other_pool = list(range(total_features))
+            other_pool.remove(h_feat)
+            other_feat = np.random.choice(other_pool)
+            pair = sorted([h_feat, other_feat])
+        elif hidden_in_interactions:
+            # Allow any combination (Visible*Visible, Visible*Hidden, Hidden*Hidden)
+            pair = sorted(np.random.choice(total_features, 2, replace=False))
+        else:
+            # Strictly Visible*Visible interactions
+            pair = sorted(np.random.choice(num_inputs, 2, replace=False))
+            
+        weight = np.random.uniform(interaction_weight_range[0], interaction_weight_range[1])
+        interactions.append((pair[0], pair[1], weight))
+
+    # 4. Build the True Equation String
+    equation_parts = []
+    for idx, w in sorted_linear:
+        equation_parts.append(f"({w:.4f} * {get_feat_name(idx)})")
+        
+    sorted_interactions = sorted(interactions, key=lambda x: abs(x[2]), reverse=True)
+    for i, j, w in sorted_interactions:
+        equation_parts.append(f"({w:.4f} * {get_feat_name(i)} * {get_feat_name(j)})")
+        
+    equation_str = "y = " + " + ".join(equation_parts) + f" + Noise(0, {noise_std})"
+
+    # Print Truth
+    print("--- Generative Model Info (With HIDDEN Features) ---")
+    print(f"Number of linear variables: {len(all_contributing_indices)} ({m_inputs} visible, {n_hidden if hidden_in_linear else 0} hidden)")
+    print(f"Number of interaction terms: {n_interactions}")
+    print("\n--- True Mathematical Equation ---")
+    print(equation_str)
+    print("----------------------------------------------------\n")
+
+    # 5. Generate the full dataset
+    full_feature_names = [get_feat_name(i) for i in range(total_features)]
+    X_full = pd.DataFrame(np.random.rand(num_samples, total_features), columns=full_feature_names)
+
+    # 6. Calculate y
+    y = np.zeros(num_samples)
+    
+    for idx, w in zip(all_contributing_indices, linear_weights):
+        y += w * X_full[get_feat_name(idx)]
+        
+    for i, j, w in interactions:
+        y += w * (X_full[get_feat_name(i)] * X_full[get_feat_name(j)])
+
+    y += np.random.normal(0, noise_std, num_samples)
+    
+    # 7. Split X into visible and hidden DataFrames
+    visible_feature_names = [f"Feature_{i}" for i in range(num_inputs)]
+    hidden_feature_names = [f"Hidden_{i}" for i in range(n_hidden)]
+    
+    X_visible = X_full[visible_feature_names].copy()
+    X_hidden = X_full[hidden_feature_names].copy()
+    
+    return X_visible, X_hidden, y, visible_feature_names, hidden_feature_names
 
 def perform_traditional_regression(X_train: pd.DataFrame, y_train: np.ndarray, 
                                    ) -> sm.regression.linear_model.RegressionResultsWrapper:
@@ -297,23 +412,38 @@ def analyze_shap_interactions(model: xgb.XGBRegressor, X_test: pd.DataFrame, fea
 def main():
     """Main execution pipeline."""
     # 1. Setup & Data
-    # X, y, feature_names = generate_synthetic_data(
+    # normal
+    # X, y, feature_names = generate_linear_synthetic_data(
     #     num_inputs=10, 
     #     num_samples=5000, 
     #     num_contributing_features=(2, 5), 
     #     weight_range=(-3, 3),
     #     noise_std=0.05,
     # )
-    X, y, feature_names = generate_synthetic_data_with_interactions(
-        num_inputs=10, 
-        num_samples=5000, 
-        num_contributing_features=(2, 5), 
-        weight_range=(-3, 3),
-        num_interactions=(1, 2),
-        interaction_weight_range=(-3, 3),
-        noise_std=0.05,
+    # with interactions
+    # X, y, feature_names = generate_synthetic_data_with_interactions(
+    #     num_inputs=10, 
+    #     num_samples=5000, 
+    #     num_contributing_features=(2, 5), 
+    #     weight_range=(-3, 3),
+    #     num_interactions=(1, 2),
+    #     interaction_weight_range=(-3, 3),
+    #     noise_std=0.05,
+    # )
+    # with hidden features
+    X, hidden_featues, y, feature_names, hidden_feature_names = generate_synthetic_data_with_hidden_features(
+    num_inputs = 10, 
+    num_samples = 5000, 
+    num_contributing_features = (2, 5), 
+    num_hidden_features = (1, 2), 
+    weight_range = (-3, 3), 
+    num_interactions = (1, 2), 
+    interaction_weight_range = (-3, 3), 
+    noise_std = 0.05, 
+    hidden_in_linear = True,           # Should hidden features have a linear impact?
+    hidden_in_interactions = True,     # Should hidden features be part of interactions?
     )
-    
+
     # Split data here so both OLS and XGBoost train on the exact same subsets
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
     
