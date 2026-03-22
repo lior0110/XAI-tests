@@ -7,6 +7,10 @@ import statsmodels.api as sm
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 
+# ==========================================
+# 1. SYNTHETIC DATA GENERATION FUNCTIONS
+# ==========================================
+
 def generate_linear_synthetic_data(num_inputs: int = 10, num_samples: int = 5000, 
                             num_contributing_features: tuple[int, int] = (2, 5), 
                             weight_range: tuple[float, float] = (-3, 3), 
@@ -30,7 +34,7 @@ def generate_linear_synthetic_data(num_inputs: int = 10, num_samples: int = 5000
     print(f"Number of contributing variables (M): {m_inputs}")
     print("\n--- True Mathematical Equation ---")
     print(equation_str)
-    print("-----------------------------\n")
+    print("-" * 39 + "\n")
 
     feature_names = [f"Feature_{i}" for i in range(num_inputs)]
     X = pd.DataFrame(np.random.rand(num_samples, num_inputs), columns=feature_names)
@@ -43,6 +47,7 @@ def generate_linear_synthetic_data(num_inputs: int = 10, num_samples: int = 5000
     y += np.random.normal(0, noise_std, num_samples)
     
     return X, y, feature_names
+
 
 def generate_synthetic_data_with_interactions(num_inputs: int = 10, num_samples: int = 5000, 
                             num_contributing_features: tuple[int, int] = (2, 5), 
@@ -86,7 +91,7 @@ def generate_synthetic_data_with_interactions(num_inputs: int = 10, num_samples:
     print(f"Number of interaction terms: {num_interactions}")
     print("\n--- True Mathematical Equation ---")
     print(equation_str)
-    print("-------------------------------------------------\n")
+    print("-" * 49 + "\n")
 
     # Generate X
     feature_names = [f"Feature_{i}" for i in range(num_inputs)]
@@ -107,6 +112,7 @@ def generate_synthetic_data_with_interactions(num_inputs: int = 10, num_samples:
     y += np.random.normal(0, noise_std, num_samples)
     
     return X, y, feature_names
+
 
 def generate_synthetic_data_with_hidden_features(
     num_inputs: int = 10, 
@@ -185,7 +191,7 @@ def generate_synthetic_data_with_hidden_features(
     print(f"Number of interaction terms: {n_interactions}")
     print("\n--- True Mathematical Equation ---")
     print(equation_str)
-    print("----------------------------------------------------\n")
+    print("-" * 52 + "\n")
 
     # 5. Generate the full dataset
     full_feature_names = [get_feat_name(i) for i in range(total_features)]
@@ -211,6 +217,11 @@ def generate_synthetic_data_with_hidden_features(
     
     return X_visible, X_hidden, y, visible_feature_names, hidden_feature_names
 
+
+# ==========================================
+# 2. MODELING & EVALUATION FUNCTIONS
+# ==========================================
+
 def perform_traditional_regression(X_train: pd.DataFrame, y_train: np.ndarray, 
                                    ) -> sm.regression.linear_model.RegressionResultsWrapper:
     """Performs traditional OLS regression to find significant features and their coefficients."""
@@ -229,6 +240,17 @@ def perform_traditional_regression(X_train: pd.DataFrame, y_train: np.ndarray,
     coefs = ols_model.params.drop('const')
     pvalues = ols_model.pvalues.drop('const')
     conf_int = ols_model.conf_int().drop('const')
+
+    # Identify statistically significant features (p < 0.05)
+    significant_features = pvalues[pvalues < 0.05].index.tolist()
+    print("\n" + "="*50)
+    print(f"Statistically Significant Features (p < 0.05):")
+    if significant_features:
+        for feat in significant_features:
+            print(f"  - {feat} (p-value: {pvalues[feat]:.4e})")
+    else:
+        print("  None detected at p < 0.05")
+    print("="*50 + "\n")
     
     # Calculate error margins for the plot
     lower_errors = coefs - conf_int[0]
@@ -247,12 +269,8 @@ def perform_traditional_regression(X_train: pd.DataFrame, y_train: np.ndarray,
     plt.tight_layout()
     plt.show()
     
-    # Identify statistically significant features (p < 0.05)
-    significant_features = pvalues[pvalues < 0.05].index.tolist()
-    print(f"\nStatistically Significant Features (p < 0.05):")
-    print(significant_features)
-    
     return ols_model
+
 
 def train_xgb_model(X: pd.DataFrame, y: np.ndarray, test_size: float = 0.2, random_state: int = 4,
                     ) -> tuple[xgb.XGBRegressor, pd.DataFrame, pd.DataFrame]:
@@ -266,9 +284,10 @@ def train_xgb_model(X: pd.DataFrame, y: np.ndarray, test_size: float = 0.2, rand
     
     return model, X_train, X_test
 
+
 def evaluate_xgb_model(model: xgb.XGBRegressor, X_test: pd.DataFrame, y_test: np.ndarray) -> None:
     """Evaluates the XGBoost model and prints regression metrics."""
-    print("\n--- XGBoost Model Evaluation ---")
+    print("\n--- XGBoost Performance (Testing) ---")
     
     # Generate predictions on the unseen test data
     y_pred = model.predict(X_test)
@@ -280,32 +299,26 @@ def evaluate_xgb_model(model: xgb.XGBRegressor, X_test: pd.DataFrame, y_test: np
     r2 = r2_score(y_test, y_pred)
     
     # Print results
+    print(f"R-squared Score:                {r2:.4f}")
     print(f"Mean Squared Error (MSE):       {mse:.4f}")
     print(f"Root Mean Squared Error (RMSE): {rmse:.4f}")
     print(f"Mean Absolute Error (MAE):      {mae:.4f}")
-    print(f"R-squared Score:                {r2:.4f}")
-    print("--------------------------------\n")
+    print("-" * 37 + "\n")
 
-def plot_all_xgb_importances(model: xgb.XGBRegressor, feature_names: list[str]) -> None:
-    """Plots Weight, Gain, and Cover importance metrics side-by-side."""
-    booster = model.get_booster()
-    metrics = ['weight', 'gain', 'cover']
-    
-    fig, axes = plt.subplots(nrows=1, ncols=3, figsize=(18, 6))
-    fig.suptitle("XGBoost Built-in Feature Importances", fontsize=16)
-    
-    for i, metric in enumerate(metrics):
-        score_dict = booster.get_score(importance_type=metric)
-        full_scores = {feat: score_dict.get(feat, 0.0) for feat in feature_names}
-        sorted_scores = dict(sorted(full_scores.items(), key=lambda item: item[1]))
-        
-        features = list(sorted_scores.keys())
-        scores = list(sorted_scores.values())
 
-        axes[i].barh(features, scores, color='#43B02A')
-        axes[i].set_title(metric.capitalize())
-        axes[i].set_xlabel(f"Average {metric.capitalize()} Score")
-        
+# ==========================================
+# 3. PLOTTING & SHAP EXPLAINABILITY FUNCTIONS
+# ==========================================
+
+def plot_all_xgb_importances(model):
+    """Plots Weight, Gain, and Cover XGBoost feature importances."""
+    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+    
+    # Fixed formatter to {v:.2f}
+    xgb.plot_importance(model, importance_type='weight', ax=axes[0], title="Importance: Weight (Frequency)", values_format="{v:.2f}")
+    xgb.plot_importance(model, importance_type='gain', ax=axes[1], title="Importance: Gain (Accuracy)", values_format="{v:.2f}")
+    xgb.plot_importance(model, importance_type='cover', ax=axes[2], title="Importance: Cover (Coverage)", values_format="{v:.2f}")
+    
     plt.tight_layout()
     plt.show()
 
@@ -319,7 +332,7 @@ def compute_shap_values(model: xgb.XGBRegressor, X_train: pd.DataFrame, X_test: 
     return shap_values
 
 def plot_shap_analysis(shap_values: shap.Explanation, feature_names: list[str]) -> None:
-    """Generates the beeswarm plot and detailed feature dependence plots."""
+    """Generates the beeswarm plot and detailed feature dependence plots with improvements."""
     # 1. Beeswarm Plot
     plt.figure(figsize=(10, 6))
     plt.title("SHAP Beeswarm Plot")
@@ -331,9 +344,10 @@ def plot_shap_analysis(shap_values: shap.Explanation, feature_names: list[str]) 
     cols = 5
     rows = (num_features + cols - 1) // cols 
 
-    fig1, axes1 = plt.subplots(nrows=rows, ncols=cols, figsize=(20, 4 * rows))
-    fig2, axes2 = plt.subplots(nrows=rows, ncols=cols, figsize=(20, 4 * rows))
-    fig3, axes3 = plt.subplots(nrows=rows, ncols=cols, figsize=(20, 4 * rows))
+    # Using sharey=True to standardize vertical scales across each row
+    fig1, axes1 = plt.subplots(nrows=rows, ncols=cols, figsize=(20, 4 * rows), sharey=True)
+    fig2, axes2 = plt.subplots(nrows=rows, ncols=cols, figsize=(20, 4 * rows), sharey=True)
+    fig3, axes3 = plt.subplots(nrows=rows, ncols=cols, figsize=(20, 4 * rows), sharey=True)
 
     axes1, axes2, axes3 = axes1.flatten(), axes2.flatten(), axes3.flatten()
 
@@ -341,24 +355,67 @@ def plot_shap_analysis(shap_values: shap.Explanation, feature_names: list[str]) 
         x_vals = shap_values.data[:, i]
         y_vals = shap_values.values[:, i]
         
-        y_vals_normalize = y_vals / (x_vals - x_vals.mean() + 1e-3) 
+        # Adaptive Epsilon based on standard deviation
+        x_std = np.std(x_vals)
+        epsilon = 1e-3 * x_std if x_std > 0 else 1e-3
+        
+        y_vals_normalize = y_vals / (x_vals - x_vals.mean() + epsilon) 
         
         sort_idx = np.argsort(x_vals)
         x_sorted, y_sorted = x_vals[sort_idx], y_vals[sort_idx]
-        y_vals_normalize2 = (y_sorted[1:] - y_sorted[:-1]) / (x_sorted[1:] - x_sorted[:-1] + 1e-8) 
-
-        axes1[i].scatter(x_vals, y_vals, alpha=0.5, s=15, color='#1E88E5')
-        axes1[i].set(title=f"SHAP vs {feature}", xlabel="Feature", ylabel="SHAP")
-
-        axes2[i].scatter(x_vals, y_vals_normalize, alpha=0.5, s=15, color='#1E88E5')
-        axes2[i].set(title=f"SHAP/Feature vs {feature}", xlabel="Feature", ylabel="SHAP/Feature")
-
-        axes3[i].scatter(x_sorted[:-1], y_vals_normalize2, alpha=0.5, s=15, color='#1E88E5')
-        axes3[i].set(title=f"d(SHAP)/d(Feature) vs {feature}", xlabel="Feature", ylabel="Derivative")
         
+        # Clipping the derivative to fix divide-by-zero spikes
+        dx = x_sorted[1:] - x_sorted[:-1] + epsilon
+        dy = y_sorted[1:] - y_sorted[:-1]
+        raw_derivative = dy / dx
+        
+        # Clip between 1st and 99th percentiles to keep sharey=True from exploding
+        lower_bound = np.percentile(raw_derivative, 1)
+        upper_bound = np.percentile(raw_derivative, 99)
+        y_vals_normalize2 = np.clip(raw_derivative, lower_bound, upper_bound)
+
+        # Color by a highly correlated interaction proxy
+        correlations = []
+        for j in range(num_features):
+            if j == i or np.std(shap_values.data[:, j]) == 0:
+                correlations.append(0)
+            else:
+                corr = np.corrcoef(y_vals, shap_values.data[:, j])[0, 1]
+                correlations.append(corr if not np.isnan(corr) else 0)
+        
+        interact_idx = np.argmax(np.abs(correlations))
+        c_vals = shap_values.data[:, interact_idx]
+        interact_name = feature_names[interact_idx]
+
+        # FIXED: Sort the color array to match x_sorted, and drop the last element for the derivative
+        c_sorted = c_vals[sort_idx]
+
+        plot_kwargs_main = {'alpha': 0.4, 's': 10, 'c': c_vals, 'cmap': 'coolwarm'}
+        plot_kwargs_deriv = {'alpha': 0.4, 's': 10, 'c': c_sorted[:-1], 'cmap': 'coolwarm'}
+
+        # Plot 1: Standard SHAP
+        axes1[i].scatter(x_vals, y_vals, **plot_kwargs_main)
+        axes1[i].set(title=f"SHAP vs {feature}", xlabel="Feature")
+        if i % cols == 0: axes1[i].set_ylabel("SHAP")
+
+        # Plot 2: Normalized SHAP
+        axes2[i].scatter(x_vals, y_vals_normalize, **plot_kwargs_main)
+        axes2[i].set(title=f"SHAP/Feature vs {feature}", xlabel="Feature")
+        if i % cols == 0: axes2[i].set_ylabel("SHAP / Feature")
+
+        # Plot 3: Derivative (Uses the sorted, N-1 color array)
+        axes3[i].scatter(x_sorted[:-1], y_vals_normalize2, **plot_kwargs_deriv)
+        axes3[i].set(title=f"d(SHAP)/d(Feature)", xlabel="Feature")
+        if i % cols == 0: axes3[i].set_ylabel("Derivative")
+        
+        # Add a zero reference line and a text box showing the interaction color variable
         for ax in [axes1[i], axes2[i], axes3[i]]:
             ax.axhline(0, color='gray', linestyle='--', linewidth=1)
+            ax.text(0.05, 0.95, f"Color: {interact_name}", transform=ax.transAxes, 
+                    fontsize=8, verticalalignment='top', 
+                    bbox=dict(boxstyle='round', facecolor='white', alpha=0.8, edgecolor='lightgray'))
 
+    # Clean up empty subplots
     for j in range(num_features, len(axes1)):
         fig1.delaxes(axes1[j])
         fig2.delaxes(axes2[j])
@@ -366,6 +423,7 @@ def plot_shap_analysis(shap_values: shap.Explanation, feature_names: list[str]) 
 
     for fig in [fig1, fig2, fig3]:
         fig.tight_layout()
+        
     plt.show()
 
 def print_feature_importance(shap_values: shap.Explanation) -> list[str]:
@@ -376,14 +434,17 @@ def print_feature_importance(shap_values: shap.Explanation) -> list[str]:
     sorted_importance = dict(sorted(feature_importance_dict.items(), key=lambda item: item[1], reverse=True))
     ranked_features = list(sorted_importance.keys())
 
-    print("\nSHAP Global Importance Dictionary:")
+    print("\n--- SHAP Feature Importance Ranking ---")
+    print("SHAP Global Importance Dictionary:")
     for feat, imp in sorted_importance.items():
         print(f"  {feat}: {imp:.4f}")
 
     print("\nRanked Features (Most to Least Important):")
     print(ranked_features)
+    print("-" * 39 + "\n")
     
     return ranked_features
+
 
 def analyze_shap_interactions(model: xgb.XGBRegressor, X_test: pd.DataFrame, feature_names: list[str]) -> None:
     """Computes True SHAP Interaction Values and plots the strongest pair."""
@@ -430,10 +491,15 @@ def analyze_shap_interactions(model: xgb.XGBRegressor, X_test: pd.DataFrame, fea
     # plt.tight_layout()
     plt.show()
 
+# ==========================================
+# 4. MAIN PIPELINE
+# ==========================================
+
 def main():
     """Main execution pipeline."""
-    # 1. Setup & Data
-    # normal
+    # 1. Setup & Data Generation
+    
+    # Normal Linear Data (Commented out as in original)
     # X, y, feature_names = generate_linear_synthetic_data(
     #     num_inputs=10, 
     #     num_samples=5000, 
@@ -441,7 +507,8 @@ def main():
     #     weight_range=(-3, 3),
     #     noise_std=0.05,
     # )
-    # with interactions
+    
+    # With Interactions Data (Commented out as in original)
     # X, y, feature_names = generate_synthetic_data_with_interactions(
     #     num_inputs=10, 
     #     num_samples=5000, 
@@ -451,18 +518,19 @@ def main():
     #     interaction_weight_range=(-3, 3),
     #     noise_std=0.05,
     # )
-    # with hidden features
-    X, hidden_featues, y, feature_names, hidden_feature_names = generate_synthetic_data_with_hidden_features(
-    num_inputs = 10, 
-    num_samples = 5000, 
-    num_contributing_features = (2, 5), 
-    num_hidden_features = (1, 2), 
-    weight_range = (-3, 3), 
-    num_interactions = (1, 2), 
-    interaction_weight_range = (-3, 3), 
-    noise_std = 0.05, 
-    hidden_in_linear = True,           # Should hidden features have a linear impact?
-    hidden_in_interactions = True,     # Should hidden features be part of interactions?
+    
+    # With Hidden Features
+    X, hidden_features, y, feature_names, hidden_feature_names = generate_synthetic_data_with_hidden_features(
+        num_inputs = 10, 
+        num_samples = 5000, 
+        num_contributing_features = (2, 5), 
+        num_hidden_features = (1, 2), 
+        weight_range = (-3, 3), 
+        num_interactions = (1, 2), 
+        interaction_weight_range = (-3, 3), 
+        noise_std = 0.05, 
+        hidden_in_linear = True,           # Should hidden features have a linear impact?
+        hidden_in_interactions = True,     # Should hidden features be part of interactions?
     )
 
     # Split data here so both OLS and XGBoost train on the exact same subsets
@@ -475,23 +543,20 @@ def main():
     # We pass the pre-split data directly to ensure apples-to-apples comparison
     model = xgb.XGBRegressor(n_estimators=100, max_depth=3, learning_rate=0.1)
     model.fit(X_train, y_train)
-    # Evaluate the XGBoost Model on the test set
+    
+    # 4. Evaluation & XGBoost Native Importances
     evaluate_xgb_model(model, X_test, y_test)
+    plot_all_xgb_importances(model)
     
-    # 4. XGBoost Native Importances
-    plot_all_xgb_importances(model, feature_names)
-    
-    # 5. Explainability (SHAP)
+    # 5. SHAP Explainability & Visualization
+    print("Computing SHAP values...")
     shap_values = compute_shap_values(model, X_train, X_test)
-    
-    # 6. Visualization (SHAP)
     plot_shap_analysis(shap_values, feature_names)
     
-    # 7. Deep Dive: SHAP Interaction Analysis
-    # Note: X_test must be a DataFrame or numpy array. We use X_test directly.
+    # 6. Deep Dive: SHAP Interaction Analysis
     analyze_shap_interactions(model, X_test, feature_names)
 
-    # 8. Summary (SHAP)
+    # 7. SHAP Feature Summary
     ranked_features = print_feature_importance(shap_values)
 
 if __name__ == "__main__":
