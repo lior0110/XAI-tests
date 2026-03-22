@@ -13,10 +13,10 @@ from sklearn.metrics import mean_squared_error, r2_score
 # 1. BIOLOGICAL DATA GENERATION FUNCTIONS
 # ==========================================
 
-def generate_categorical_features(num_samples: int, feature_names: list[str]) -> pd.DataFrame:
+def generate_categorical_features(num_samples: int, probability_range: tuple[float, float], feature_names: list[str]) -> pd.DataFrame:
     """Generates categorical features (0, 1, 2) mimicking gene distributions."""
     num_features = len(feature_names)
-    P = np.random.uniform(0.01, 0.49, num_features)
+    P = np.random.uniform(probability_range[0], probability_range[1], num_features)
     
     data = np.zeros((num_samples, num_features))
     for i in range(num_features):
@@ -55,6 +55,7 @@ def apply_epistatic_interaction(x1_series: pd.Series, x2_series: pd.Series, weig
 def generate_synthetic_data_with_hidden_features(
     num_inputs: int = 10, 
     num_samples: int = 5000, 
+    probability_range: tuple[float, float] = (0.01, 0.49),
     num_contributing_features: tuple[int, int] = (2, 5), 
     num_hidden_features: tuple[int, int] = (1, 2), 
     weight_range: tuple[float, float] = (-3, 3), 
@@ -107,7 +108,7 @@ def generate_synthetic_data_with_hidden_features(
     print("y = \n  " + " + \n  ".join(equation_parts) + f" \n  + Noise(0, {noise_std})\n")
 
     full_feature_names = [get_feat_name(i) for i in range(total_features)]
-    X_full = generate_categorical_features(num_samples, full_feature_names)
+    X_full = generate_categorical_features(num_samples, probability_range, full_feature_names)
 
     y = np.zeros(num_samples)
     for idx, w, mode in linear_components:
@@ -340,6 +341,7 @@ def main():
     X, X_hidden, y, visible_features, hidden_features = generate_synthetic_data_with_hidden_features(
         num_inputs=10, 
         num_samples=5000, 
+        probability_range=(0.01, 0.49),
         num_contributing_features=(3, 5), 
         num_hidden_features=(1, 2), 
         weight_range=(-3, 3), 
