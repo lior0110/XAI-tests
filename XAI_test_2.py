@@ -126,13 +126,13 @@ def generate_synthetic_data_with_hidden_features(
 # 2. MODELING & EVALUATION FUNCTIONS
 # ==========================================
 
-def perform_traditional_regression(X_train: pd.DataFrame, y_train: np.ndarray) -> sm.regression.linear_model.RegressionResultsWrapper:
+def perform_traditional_regression(X_train: pd.DataFrame, y_train: np.ndarray, pvalue_threshold: float = 0.05
+                                   ) -> tuple[sm.regression.linear_model.RegressionResultsWrapper, dict[str, dict[str, float]]]:
     """Performs traditional OLS regression to find significant features and their coefficients."""
     print("\n--- Traditional Regression Analysis (OLS) ---")
     
-    # Add a constant term for the intercept (statsmodels requires this explicitly)
-    # Cast to float to ensure statsmodels compatibility with integer/categorical arrays
-    X_train_sm = sm.add_constant(X_train.astype(float))
+    # Add a constant term for the intercept
+    X_train_sm = sm.add_constant(X_train)
     
     # Fit the Ordinary Least Squares (OLS) model
     ols_model = sm.OLS(y_train, X_train_sm).fit()
@@ -144,16 +144,30 @@ def perform_traditional_regression(X_train: pd.DataFrame, y_train: np.ndarray) -
     coefs = ols_model.params.drop('const')
     pvalues = ols_model.pvalues.drop('const')
     conf_int = ols_model.conf_int().drop('const')
+
+    # Identify statistically significant features
+    sig_mask = pvalues < pvalue_threshold
+    sig_pvalues = pvalues[sig_mask]
+    sig_coefs = coefs[sig_mask]
     
-    # Identify statistically significant features (p < 0.05)
-    significant_features = pvalues[pvalues < 0.05].index.tolist()
+    # Create the dictionary of significant features
+    unsorted_sig_features = {}
+    for feat in sig_pvalues.index:
+        unsorted_sig_features[feat] = {
+            'pvalue': sig_pvalues[feat],
+            'coefficient': sig_coefs[feat]
+        }
+        
+    # Sort the dictionary by p-value (ascending: most significant first)
+    significant_features = dict(sorted(unsorted_sig_features.items(), key=lambda item: item[1]['pvalue']))
+
     print("\n" + "="*50)
-    print(f"Statistically Significant Features (p < 0.05):")
+    print(f"Statistically Significant Features (p < {pvalue_threshold}):")
     if significant_features:
-        for feat in significant_features:
-            print(f"  - {feat} (p-value: {pvalues[feat]:.4e})")
+        for feat, stats in significant_features.items():
+            print(f"  - {feat} (p-value: {stats['pvalue']:.4e}, coef: {stats['coefficient']:.4f})")
     else:
-        print("  None detected at p < 0.05")
+        print(f"  None detected at p < {pvalue_threshold}")
     print("="*50 + "\n")
     
     # Calculate error margins for the plot
@@ -173,7 +187,7 @@ def perform_traditional_regression(X_train: pd.DataFrame, y_train: np.ndarray) -
     plt.tight_layout()
     plt.show()
     
-    return ols_model
+    return ols_model, significant_features
 
 def evaluate_xgb_model(model, X_test: pd.DataFrame, y_test: np.ndarray):
     """Evaluates the XGBoost model."""
@@ -186,11 +200,15 @@ def evaluate_xgb_model(model, X_test: pd.DataFrame, y_test: np.ndarray):
 # 3. PLOTTING & SHAP EXPLAINABILITY FUNCTIONS
 # ==========================================
 
-def plot_all_xgb_importances(model):
-    """Plots Weight, Gain, and Cover XGBoost feature importances."""
+def plot_all_xgb_importances(model) -> tuple[dict, dict, dict]:
+    """Plots and outputs Weight, Gain, and Cover XGBoost feature importances."""
     fig, axes = plt.subplots(1, 3, figsize=(18, 5))
     
     # Fixed formatter to {v:.2f}
+    weight_importance = model.get_booster().get_score(importance_type='weight')
+    gain_importance = model.get_booster().get_score(importance_type='gain')
+    cover_importance = model.get_booster().get_score(importance_type='cover')
+
     xgb.plot_importance(model, importance_type='weight', ax=axes[0], title="Importance: Weight (Frequency)", values_format="{v:.2f}")
     xgb.plot_importance(model, importance_type='gain', ax=axes[1], title="Importance: Gain (Accuracy)", values_format="{v:.2f}")
     xgb.plot_importance(model, importance_type='cover', ax=axes[2], title="Importance: Cover (Coverage)", values_format="{v:.2f}")
@@ -198,17 +216,63 @@ def plot_all_xgb_importances(model):
     plt.tight_layout()
     plt.show()
 
-def print_feature_importance(shap_values):
-    """Prints a ranking based on mean absolute SHAP value."""
-    mean_abs_shap = np.abs(shap_values.values).mean(axis=0)
-    importance_df = pd.DataFrame({
-        'Feature': shap_values.feature_names,
-        'Mean_Abs_SHAP': mean_abs_shap
-    }).sort_values(by='Mean_Abs_SHAP', ascending=False)
+    return weight_importance, gain_importance, cover_importance
+
+def print_feature_importance(shap_values: shap.Explanation, X_test: pd.DataFrame) -> pd.DataFrame:
+    """Prints a ranking based on SHAP value and returns distribution stats per feature option."""
+    feature_names = shap_values.feature_names
     
-    print("--- SHAP Feature Importance Ranking ---")
-    print(importance_df.head(10).to_string(index=False))
-    print("---------------------------------------\n")
+    # List to collect the distribution statistics
+    stats_list = []
+    
+    for i, feature in enumerate(feature_names):
+        # Extract actual categorical data for this feature
+        feature_data = X_test[feature].values
+        # Extract SHAP values for this feature
+        feature_shap = shap_values.values[:, i]
+        
+        # Calculate global mean absolute SHAP for this feature to maintain a ranking system
+        global_mean_abs = np.abs(feature_shap).mean()
+        
+        # Iterate through unique options/genotypes present for this feature (e.g., 0, 1, 2)
+        unique_options = np.unique(feature_data)
+        for option in unique_options:
+            # Mask for the current option
+            mask = (feature_data == option)
+            option_shap = feature_shap[mask]
+            
+            # Calculate descriptive stats using pandas
+            stats = pd.Series(option_shap).describe()
+            
+            stats_list.append({
+                'Feature': feature,
+                'Global_Mean_Abs_SHAP': global_mean_abs,
+                'Option': option,
+                'Count': int(stats['count']),
+                'Mean_SHAP': stats['mean'],
+                'Std_SHAP': stats['std'] if not pd.isna(stats['std']) else 0.0,
+                'Min_SHAP': stats['min'],
+                '25%_SHAP': stats['25%'],
+                'Median_SHAP': stats['50%'],
+                '75%_SHAP': stats['75%'],
+                'Max_SHAP': stats['max']
+            })
+            
+    # Create the detailed DataFrame
+    importance_df = pd.DataFrame(stats_list)
+    
+    # Sort first by the global importance of the feature, then by the specific option
+    importance_df.sort_values(
+        by=['Global_Mean_Abs_SHAP', 'Feature', 'Option'], 
+        ascending=[False, True, True], 
+        inplace=True
+    )
+    
+    print("--- SHAP Feature Distribution Statistics by Genotype ---")
+    # Print the top 15 rows to preview the top few features and their options
+    print(importance_df.head(15).to_string(index=False))
+    print("------------------------------------------------------\n")
+    
     return importance_df
 
 def plot_shap_summary_violin(shap_values, X_test: pd.DataFrame):
@@ -269,68 +333,64 @@ def plot_all_individual_shap_violins(shap_values, X_test: pd.DataFrame, feature_
     plt.subplots_adjust(top=0.90) 
     plt.show()
 
-def analyze_shap_interactions(model, X_test: pd.DataFrame):
-    """Calculates SHAP interaction values, plots the summary, and isolates the strongest interaction."""
-    print("\n--- Computing SHAP Interaction Values (this may take a moment) ---")
+def analyze_shap_interactions(model: xgb.XGBRegressor, X_test: pd.DataFrame, feature_names: list[str]) -> dict[str, float]:
+    """Computes True SHAP Interaction Values, plots the strongest pair, and returns a dictionary of global interaction importances."""
+    print("\n--- Computing SHAP Interaction Values ---")
     explainer = shap.TreeExplainer(model)
     
-    # FIX: Cast to float to bypass SHAP's internal categorical bug
+    # THE FIX: Cast the dataframe to float to bypass the SHAP DMatrix categorical bug
     X_test_numeric = X_test.astype(float)
-    feature_names = X_test_numeric.columns.tolist()
     
     # Output shape is (n_samples, n_features, n_features)
-    shap_interaction_values = explainer.shap_interaction_values(X_test_numeric)
+    # We pass the numeric version here!
+    interaction_values = explainer.shap_interaction_values(X_test_numeric)
     
-    # 1. Global Interaction Summary
-    # plt.title("SHAP Top Interactions Summary")
-    shap.summary_plot(shap_interaction_values, X_test_numeric, max_display=20, show=False)
+    # Global Interaction Summary
+    shap.summary_plot(interaction_values, X_test_numeric, feature_names=feature_names, max_display=len(feature_names), show=False)
     plt.show()
     
-    # 2. Find the strongest interacting pair
-    # Take mean absolute value across all samples
-    mean_abs_interactions = np.abs(shap_interaction_values).mean(axis=0)
+    # Build the Global Interaction Dictionary
+    mean_abs_interactions = np.abs(interaction_values).mean(axis=0)
+    interaction_dict = {}
+    n_features = len(feature_names)
     
-    # Zero out the diagonal (which represents main effects, not interactions)
-    np.fill_diagonal(mean_abs_interactions, 0)
+    for i in range(n_features):
+        for j in range(i + 1, n_features):
+            total_interaction = mean_abs_interactions[i, j] * 2
+            pair_name = f"{feature_names[i]} * {feature_names[j]}"
+            interaction_dict[pair_name] = total_interaction
+            
+    # Sort from most important interaction to least important
+    sorted_interactions = dict(sorted(interaction_dict.items(), key=lambda item: item[1], reverse=True))
     
-    # Find indices of the maximum interaction
-    idx_i, idx_j = np.unravel_index(np.argmax(mean_abs_interactions), mean_abs_interactions.shape)
+    # Find the strongest interacting pair
+    strongest_pair = list(sorted_interactions.keys())[0]
+    feat_i, feat_j = strongest_pair.split(" * ")
     
-    feat_i, feat_j = feature_names[idx_i], feature_names[idx_j]
     print(f"\nStrongest Interaction found by SHAP: {feat_i} & {feat_j}")
-    
-    # 3. Plot specific dependence for the strongest interaction
     print(f"Plotting pure interaction effect for {feat_i} and {feat_j}...")
+    
+    idx_i = feature_names.index(feat_i)
+    idx_j = feature_names.index(feat_j)
     
     shap.dependence_plot(
         (idx_i, idx_j), 
-        shap_interaction_values, 
+        interaction_values, 
         X_test_numeric, 
         feature_names=feature_names,
         show=False
     )
-    plt.title(f"Pure SHAP Interaction Effect: {feat_i} * {feat_j}")
-    plt.tight_layout()
     plt.show()
 
-def print_feature_importance(shap_values: shap.Explanation) -> list[str]:
-    """Calculates and prints global feature importance based on mean absolute SHAP values."""
-    global_importances = np.abs(shap_values.values).mean(0)
-    feature_importance_dict = dict(zip(shap_values.feature_names, global_importances))
+    # Print the ranked interaction dictionary
+    print("\n--- SHAP Interaction Feature Importance Ranking ---")
+    print("Top 10 Strongest Interactions:")
+    for pair, imp in list(sorted_interactions.items())[:10]: 
+        print(f"  {pair}: {imp:.6f}")
+    print("-" * 49 + "\n")
 
-    sorted_importance = dict(sorted(feature_importance_dict.items(), key=lambda item: item[1], reverse=True))
-    ranked_features = list(sorted_importance.keys())
+    return sorted_interactions
 
-    print("\n--- SHAP Feature Importance Ranking ---")
-    print("SHAP Global Importance Dictionary:")
-    for feat, imp in sorted_importance.items():
-        print(f"  {feat}: {imp:.4f}")
-
-    print("\nRanked Features (Most to Least Important):")
-    print(ranked_features)
-    print("-" * 39 + "\n")
-    
-    return ranked_features
 
 # ==========================================
 # 4. MAIN PIPELINE
@@ -355,7 +415,7 @@ def main():
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
     
     # 2. Traditional Baseline (OLS)
-    ols_model = perform_traditional_regression(X_train, y_train)
+    ols_model, significant_features = perform_traditional_regression(X_train, y_train)
     
     # 3. Categorical Conversion for XGBoost
     X_train_cat = X_train.astype('category')
@@ -374,7 +434,7 @@ def main():
     
     # 5. Evaluation & XGBoost Importances
     evaluate_xgb_model(model, X_test_cat, y_test)
-    plot_all_xgb_importances(model)
+    weight_importance, gain_importance, cover_importance = plot_all_xgb_importances(model)
     
     # 6. SHAP Explainability 
     print("Computing SHAP values...")
@@ -389,10 +449,10 @@ def main():
     plot_all_individual_shap_violins(shap_values, X_test_cat, visible_features)
     
     # 8. Deep Dive: Interactions
-    analyze_shap_interactions(model, X_test_cat)
+    sorted_interactions = analyze_shap_interactions(model, X_test_cat, visible_features)
     
     # Print numerical ranking and save the list!
-    ranked_features = print_feature_importance(shap_values)
+    importance_df = print_feature_importance(shap_values, X_test_cat)
 
 if __name__ == "__main__":
     main()

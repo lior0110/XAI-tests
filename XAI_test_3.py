@@ -130,7 +130,7 @@ def generate_synthetic_classification_data(
 # 2. MODELING & EVALUATION FUNCTIONS
 # ==========================================
 
-def perform_traditional_chi_square(X_train: pd.DataFrame, y_train: np.ndarray):
+def perform_traditional_chi_square(X_train: pd.DataFrame, y_train: np.ndarray, pvalue_threshold: float = 0.05) -> dict[str, float]:
     """Performs Standard Bivariate Pearson Chi-Square Tests."""
     print("\n--- Traditional Baseline 1: Chi-Square Independence Tests ---")
     p_values = {}
@@ -146,14 +146,14 @@ def perform_traditional_chi_square(X_train: pd.DataFrame, y_train: np.ndarray):
     # Sort features by significance (lowest p-value first)
     sorted_p_values = sorted(p_values.items(), key=lambda x: x[1])
     
-    print("Significant Features (p < 0.05) [Bivariate Test]:")
+    print(f"Significant Features (p < {pvalue_threshold}) [Bivariate Test]:")
     significant_found = False
     for feat, p in sorted_p_values:
-        if p < 0.05:
+        if p < pvalue_threshold:
             print(f"  - {feat}: p-value = {p:.4e}")
             significant_found = True
     if not significant_found:
-        print("  None detected at p < 0.05")
+        print(f"  None detected at p < {pvalue_threshold}")
         
     # Plot -log10(p-values)
     feats = [x[0] for x in sorted_p_values]
@@ -162,7 +162,7 @@ def perform_traditional_chi_square(X_train: pd.DataFrame, y_train: np.ndarray):
     
     plt.figure(figsize=(10, 5))
     sns.barplot(x=feats, y=log_ps, color='skyblue')
-    plt.axhline(-np.log10(0.05), color='red', linestyle='--', label='Significance Threshold (p=0.05)')
+    plt.axhline(-np.log10(pvalue_threshold), color='red', linestyle='--', label=f'Significance Threshold (p={pvalue_threshold})')
     plt.title("Chi-Square Results: -log10(p-value) by Feature")
     plt.ylabel("-log10(p-value) [Higher is more significant]")
     plt.xticks(rotation=45)
@@ -170,7 +170,9 @@ def perform_traditional_chi_square(X_train: pd.DataFrame, y_train: np.ndarray):
     plt.tight_layout()
     plt.show()
 
-def perform_traditional_logistic_regression(X_train: pd.DataFrame, y_train: np.ndarray):
+    return sorted_p_values
+
+def perform_traditional_logistic_regression(X_train: pd.DataFrame, y_train: np.ndarray, pvalue_threshold: float = 0.05) -> tuple[sm.Logit, list[str]]:
     """Performs traditional Multivariate Logistic Regression (statsmodels)."""
     print("\n--- Traditional Baseline 2: Multivariate Logistic Regression ---")
     X_train_sm = sm.add_constant(X_train.astype(float))
@@ -190,7 +192,7 @@ def perform_traditional_logistic_regression(X_train: pd.DataFrame, y_train: np.n
             for feat in significant_features:
                 print(f"  - {feat} (p-value: {pvalues[feat]:.4e})")
         else:
-            print("  None detected at p < 0.05")
+            print(f"  None detected at p < {pvalue_threshold}")
         print("="*50 + "\n")
         
         lower_errors = coefs - conf_int[0]
@@ -206,7 +208,7 @@ def perform_traditional_logistic_regression(X_train: pd.DataFrame, y_train: np.n
         plt.xticks(rotation=45)
         plt.tight_layout()
         plt.show()
-        return logit_model
+        return logit_model, significant_features
     except Exception as e:
         print(f"Logistic Regression failed (often due to perfect separation): {e}")
         return None
@@ -225,13 +227,21 @@ def evaluate_xgb_classifier(model, X_test: pd.DataFrame, y_test: np.ndarray):
 # 3. PLOTTING & SHAP EXPLAINABILITY FUNCTIONS
 # ==========================================
 
-def plot_all_xgb_importances(model):
+def plot_all_xgb_importances(model) -> tuple[dict, dict, dict]:
     fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+    
+    # Fixed formatter to {v:.2f}
+    weight_importance = model.get_booster().get_score(importance_type='weight')
+    gain_importance = model.get_booster().get_score(importance_type='gain')
+    cover_importance = model.get_booster().get_score(importance_type='cover')
+
     xgb.plot_importance(model, importance_type='weight', ax=axes[0], title="Importance: Weight (Frequency)", values_format="{v:.2f}")
     xgb.plot_importance(model, importance_type='gain', ax=axes[1], title="Importance: Gain (Accuracy)", values_format="{v:.2f}")
     xgb.plot_importance(model, importance_type='cover', ax=axes[2], title="Importance: Cover (Coverage)", values_format="{v:.2f}")
     plt.tight_layout()
     plt.show()
+
+    return weight_importance, gain_importance, cover_importance
 
 def plot_all_individual_shap_violins(shap_values, X_test: pd.DataFrame, feature_names: list[str]):
     num_features = len(feature_names)
@@ -271,41 +281,120 @@ def plot_all_individual_shap_violins(shap_values, X_test: pd.DataFrame, feature_
     plt.subplots_adjust(top=0.90) 
     plt.show()
 
-def analyze_shap_interactions(model, X_test: pd.DataFrame):
+def analyze_shap_interactions(model: xgb.XGBRegressor, X_test: pd.DataFrame, feature_names: list[str]) -> dict[str, float]:
+    """Computes True SHAP Interaction Values, plots the strongest pair, and returns a dictionary of global interaction importances."""
     print("\n--- Computing SHAP Interaction Values ---")
     explainer = shap.TreeExplainer(model)
+    
+    # THE FIX: Cast the dataframe to float to bypass the SHAP DMatrix categorical bug
     X_test_numeric = X_test.astype(float)
-    feature_names = X_test_numeric.columns.tolist()
     
-    shap_interaction_values = explainer.shap_interaction_values(X_test_numeric)
+    # Output shape is (n_samples, n_features, n_features)
+    # We pass the numeric version here!
+    interaction_values = explainer.shap_interaction_values(X_test_numeric)
     
-    shap.summary_plot(shap_interaction_values, X_test_numeric, max_display=20, show=False)
+    # Global Interaction Summary
+    shap.summary_plot(interaction_values, X_test_numeric, feature_names=feature_names, max_display=len(feature_names), show=False)
     plt.show()
     
-    mean_abs_interactions = np.abs(shap_interaction_values).mean(axis=0)
-    np.fill_diagonal(mean_abs_interactions, 0)
+    # Build the Global Interaction Dictionary
+    mean_abs_interactions = np.abs(interaction_values).mean(axis=0)
+    interaction_dict = {}
+    n_features = len(feature_names)
     
-    idx_i, idx_j = np.unravel_index(np.argmax(mean_abs_interactions), mean_abs_interactions.shape)
-    feat_i, feat_j = feature_names[idx_i], feature_names[idx_j]
+    for i in range(n_features):
+        for j in range(i + 1, n_features):
+            total_interaction = mean_abs_interactions[i, j] * 2
+            pair_name = f"{feature_names[i]} * {feature_names[j]}"
+            interaction_dict[pair_name] = total_interaction
+            
+    # Sort from most important interaction to least important
+    sorted_interactions = dict(sorted(interaction_dict.items(), key=lambda item: item[1], reverse=True))
+    
+    # Find the strongest interacting pair
+    strongest_pair = list(sorted_interactions.keys())[0]
+    feat_i, feat_j = strongest_pair.split(" * ")
     
     print(f"\nStrongest Interaction found by SHAP: {feat_i} & {feat_j}")
+    print(f"Plotting pure interaction effect for {feat_i} and {feat_j}...")
+    
+    idx_i = feature_names.index(feat_i)
+    idx_j = feature_names.index(feat_j)
     
     shap.dependence_plot(
-        (idx_i, idx_j), shap_interaction_values, X_test_numeric, feature_names=feature_names, show=False
+        (idx_i, idx_j), 
+        interaction_values, 
+        X_test_numeric, 
+        feature_names=feature_names,
+        show=False
     )
-    plt.title(f"Pure SHAP Interaction Effect: {feat_i} * {feat_j} (Log-Odds)")
-    plt.tight_layout()
     plt.show()
 
-def print_feature_importance(shap_values: shap.Explanation) -> list[str]:
-    global_importances = np.abs(shap_values.values).mean(0)
-    feature_importance_dict = dict(zip(shap_values.feature_names, global_importances))
-    sorted_importance = dict(sorted(feature_importance_dict.items(), key=lambda item: item[1], reverse=True))
+    # Print the ranked interaction dictionary
+    print("\n--- SHAP Interaction Feature Importance Ranking ---")
+    print("Top 10 Strongest Interactions:")
+    for pair, imp in list(sorted_interactions.items())[:10]: 
+        print(f"  {pair}: {imp:.6f}")
+    print("-" * 49 + "\n")
+
+    return sorted_interactions
+
+def print_feature_importance(shap_values: shap.Explanation, X_test: pd.DataFrame) -> pd.DataFrame:
+    """Prints a ranking based on SHAP value and returns distribution stats per feature option."""
+    feature_names = shap_values.feature_names
     
-    print("\n--- SHAP Feature Importance Ranking (Impact on Log-Odds) ---")
-    for feat, imp in sorted_importance.items():
-        print(f"  {feat}: {imp:.4f}")
-    return list(sorted_importance.keys())
+    # List to collect the distribution statistics
+    stats_list = []
+    
+    for i, feature in enumerate(feature_names):
+        # Extract actual categorical data for this feature
+        feature_data = X_test[feature].values
+        # Extract SHAP values for this feature
+        feature_shap = shap_values.values[:, i]
+        
+        # Calculate global mean absolute SHAP for this feature to maintain a ranking system
+        global_mean_abs = np.abs(feature_shap).mean()
+        
+        # Iterate through unique options/genotypes present for this feature (e.g., 0, 1, 2)
+        unique_options = np.unique(feature_data)
+        for option in unique_options:
+            # Mask for the current option
+            mask = (feature_data == option)
+            option_shap = feature_shap[mask]
+            
+            # Calculate descriptive stats using pandas
+            stats = pd.Series(option_shap).describe()
+            
+            stats_list.append({
+                'Feature': feature,
+                'Global_Mean_Abs_SHAP': global_mean_abs,
+                'Option': option,
+                'Count': int(stats['count']),
+                'Mean_SHAP': stats['mean'],
+                'Std_SHAP': stats['std'] if not pd.isna(stats['std']) else 0.0,
+                'Min_SHAP': stats['min'],
+                '25%_SHAP': stats['25%'],
+                'Median_SHAP': stats['50%'],
+                '75%_SHAP': stats['75%'],
+                'Max_SHAP': stats['max']
+            })
+            
+    # Create the detailed DataFrame
+    importance_df = pd.DataFrame(stats_list)
+    
+    # Sort first by the global importance of the feature, then by the specific option
+    importance_df.sort_values(
+        by=['Global_Mean_Abs_SHAP', 'Feature', 'Option'], 
+        ascending=[False, True, True], 
+        inplace=True
+    )
+    
+    print("--- SHAP Feature Distribution Statistics by Genotype ---")
+    # Print the top 15 rows to preview the top few features and their options
+    print(importance_df.head(15).to_string(index=False))
+    print("------------------------------------------------------\n")
+    
+    return importance_df
 
 # ==========================================
 # 4. MAIN PIPELINE
@@ -330,10 +419,10 @@ def main():
     X_train, X_test, y_train, y_test = train_test_split(X, y_binary, test_size=0.2, random_state=42)
     
     # 2a. Traditional Baseline 1 (Chi-Square Test)
-    perform_traditional_chi_square(X_train, y_train)
+    chi_square_features = perform_traditional_chi_square(X_train, y_train)
 
     # 2b. Traditional Baseline 2 (Logistic Regression)
-    perform_traditional_logistic_regression(X_train, y_train)
+    logistic_model, logistic_features = perform_traditional_logistic_regression(X_train, y_train)
     
     # 3. Categorical Conversion for XGBoost
     X_train_cat = X_train.astype('category')
@@ -353,7 +442,7 @@ def main():
     
     # 5. Evaluation & XGBoost Importances
     evaluate_xgb_classifier(model, X_test_cat, y_test)
-    plot_all_xgb_importances(model)
+    weight_importance, gain_importance, cover_importance = plot_all_xgb_importances(model)
     
     # 6. SHAP Explainability 
     print("Computing SHAP values...")
@@ -370,10 +459,10 @@ def main():
     plot_all_individual_shap_violins(shap_values, X_test_cat, visible_features)
     
     # 8. Deep Dive: Interactions
-    analyze_shap_interactions(model, X_test_cat)
+    sorted_interactions = analyze_shap_interactions(model, X_test_cat, visible_features)
     
     # Print numerical ranking
-    print_feature_importance(shap_values)
+    importance_df = print_feature_importance(shap_values, X_test_cat)
 
 if __name__ == "__main__":
     main()
