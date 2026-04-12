@@ -465,7 +465,6 @@ def print_feature_importance(shap_values: shap.Explanation) -> dict[str, float]:
     
     return sorted_importance
 
-
 def analyze_shap_interactions(model: xgb.XGBRegressor, X_test: pd.DataFrame, feature_names: list[str]) -> dict[str, float]:
     """Computes True SHAP Interaction Values, plots the strongest pair, and returns a dictionary of global interaction importances."""
     print("\n--- Computing SHAP Interaction Values ---")
@@ -531,7 +530,168 @@ def analyze_shap_interactions(model: xgb.XGBRegressor, X_test: pd.DataFrame, fea
     return sorted_interactions
 
 # ==========================================
-# 4. MAIN PIPELINE
+# 4. p-like values for SHAP importances
+# ==========================================
+
+def compute_shap_pvalues(X_train: pd.DataFrame, y_train: np.ndarray, 
+                         X_test: pd.DataFrame, true_shap_values: shap.Explanation, 
+                         feature_names: list[str], n_permutations: int = 50) -> dict[str, float]:
+    """
+    Calculates empirical p-values for SHAP feature importances using a permutation test.
+    """
+    print(f"\n--- Calculating Empirical SHAP p-values (Permutations: {n_permutations}) ---")
+    
+    # 1. Get baseline (true) global SHAP importances
+    true_importances = np.abs(true_shap_values.values).mean(axis=0)
+    
+    # 2. Initialize array to hold null importances
+    null_importances = np.zeros((n_permutations, len(feature_names)))
+    
+    # 3. Generate null distribution by breaking the relationship with y
+    for i in range(n_permutations):
+        # Shuffle target to destroy any real predictive signal
+        y_train_shuffled = np.random.permutation(y_train)
+        
+        # Train dummy model on shuffled data
+        null_model = xgb.XGBRegressor(n_estimators=100, max_depth=3, learning_rate=0.1, n_jobs=-1)
+        null_model.fit(X_train, y_train_shuffled)
+        
+        # Compute SHAP for null model
+        null_explainer = shap.TreeExplainer(null_model)
+        null_shap_vals = null_explainer(X_test)
+        
+        # Store global importance for this permutation
+        null_importances[i, :] = np.abs(null_shap_vals.values).mean(axis=0)
+        
+    # 4. Calculate empirical p-values
+    p_values = {}
+    for idx, feat in enumerate(feature_names):
+        # How many times did pure noise generate a SHAP score higher than our real model?
+        count_extreme = np.sum(null_importances[:, idx] >= true_importances[idx])
+        
+        # Formula for empirical p-value
+        p_val = (count_extreme + 1) / (n_permutations + 1)
+        p_values[feat] = p_val
+        
+    # Sort features by p-value (lowest/most significant first)
+    sorted_pvalues = dict(sorted(p_values.items(), key=lambda item: item[1]))
+
+    print("\nSHAP Empirical P-values (< 0.05 is statistically significant):")
+    for feat, pval in sorted_pvalues.items():
+        significance = "***" if pval < 0.01 else ("*" if pval < 0.05 else "")
+        print(f"  - {feat}: {pval:.4f} {significance}")
+    print("-" * 52 + "\n")
+        
+    return sorted_pvalues
+
+def compute_shap_shadow_features(X_train: pd.DataFrame, y_train: np.ndarray, 
+                                 X_test: pd.DataFrame, feature_names: list[str]) -> dict[str, bool]:
+    """
+    Uses shadow features to determine which SHAP values are statistically significant.
+    A feature is significant if its SHAP importance is greater than the max SHAP 
+    importance of any purely random shadow feature.
+    """
+    print("\n--- Running SHAP Shadow Feature Analysis ---")
+    
+    # 1. Create Shadow Features (Shuffle each column independently)
+    X_train_shadow = X_train.copy()
+    X_test_shadow = X_test.copy()
+    
+    shadow_names = [f"Shadow_{feat}" for feat in feature_names]
+    X_train_shadow.columns = shadow_names
+    X_test_shadow.columns = shadow_names
+    
+    for col in shadow_names:
+        # Permute the columns to break relationships with y
+        X_train_shadow[col] = np.random.permutation(X_train_shadow[col].values)
+        X_test_shadow[col] = np.random.permutation(X_test_shadow[col].values)
+        
+    # 2. Combine Real and Shadow Features
+    X_train_extended = pd.concat([X_train, X_train_shadow], axis=1)
+    X_test_extended = pd.concat([X_test, X_test_shadow], axis=1)
+    
+    # 3. Train a single model on the extended dataset
+    shadow_model = xgb.XGBRegressor(n_estimators=100, max_depth=3, learning_rate=0.1, n_jobs=-1)
+    shadow_model.fit(X_train_extended, y_train)
+    
+    # 4. Compute SHAP values for all features (real + shadow)
+    explainer = shap.TreeExplainer(shadow_model)
+    shap_vals_extended = explainer(X_test_extended)
+    
+    # 5. Calculate mean absolute global importances
+    importances = np.abs(shap_vals_extended.values).mean(axis=0)
+    importance_dict = dict(zip(X_train_extended.columns, importances))
+    
+    # 6. Find the maximum importance among the shadow features
+    max_shadow_importance = max([importance_dict[name] for name in shadow_names])
+    print(f"Maximum Shadow Feature Importance (Noise Threshold): {max_shadow_importance:.4f}")
+    
+    # 7. Evaluate real features against the threshold
+    results = {}
+    print("\nShadow Feature Significance Results:")
+    for feat in feature_names:
+        feat_importance = importance_dict[feat]
+        is_significant = feat_importance > max_shadow_importance
+        results[feat] = is_significant
+        
+        status = "PASSED (Significant)" if is_significant else "FAILED (Noise)"
+        print(f"  - {feat}: {feat_importance:.4f} -> {status}")
+        
+    print("-" * 46 + "\n")
+    return results
+
+def compute_shap_bootstrapping(X_train: pd.DataFrame, y_train: np.ndarray, 
+                               X_test: pd.DataFrame, feature_names: list[str], 
+                               n_bootstraps: int = 50) -> dict[str, tuple[float, float, float]]:
+    """
+    Calculates 95% Confidence Intervals for SHAP feature importances using bootstrapping.
+    Returns a dict with format: {feature: (mean_importance, lower_bound, upper_bound)}
+    """
+    print(f"\n--- Running SHAP Bootstrapping Analysis (Iterations: {n_bootstraps}) ---")
+    
+    # Array to hold global importances for each bootstrap
+    bootstrap_importances = np.zeros((n_bootstraps, len(feature_names)))
+    
+    for i in range(n_bootstraps):
+        # 1. Sample with replacement
+        indices = np.random.choice(len(X_train), size=len(X_train), replace=True)
+        X_train_boot = X_train.iloc[indices]
+        y_train_boot = y_train[indices] if isinstance(y_train, np.ndarray) else y_train.iloc[indices]
+        
+        # 2. Train model on bootstrap sample
+        boot_model = xgb.XGBRegressor(n_estimators=100, max_depth=3, learning_rate=0.1, n_jobs=-1)
+        boot_model.fit(X_train_boot, y_train_boot)
+        
+        # 3. Compute SHAP on the CONSTANT test set
+        boot_explainer = shap.TreeExplainer(boot_model)
+        boot_shap_vals = boot_explainer(X_test)
+        
+        # 4. Store global importance
+        bootstrap_importances[i, :] = np.abs(boot_shap_vals.values).mean(axis=0)
+        
+    # Calculate Confidence Intervals
+    results = {}
+    print("\nSHAP Bootstrapped 95% Confidence Intervals:")
+    
+    # Calculate means to sort the output
+    mean_importances = np.mean(bootstrap_importances, axis=0)
+    sorted_indices = np.argsort(mean_importances)[::-1] # Descending order
+    
+    for idx in sorted_indices:
+        feat = feature_names[idx]
+        mean_val = mean_importances[idx]
+        # 2.5th and 97.5th percentiles give the 95% CI
+        lower_bound = np.percentile(bootstrap_importances[:, idx], 2.5)
+        upper_bound = np.percentile(bootstrap_importances[:, idx], 97.5)
+        
+        results[feat] = (mean_val, lower_bound, upper_bound)
+        print(f"  - {feat}: {mean_val:.4f} (95% CI: [{lower_bound:.4f}, {upper_bound:.4f}])")
+        
+    print("-" * 55 + "\n")
+    return results
+
+# ==========================================
+# 5. MAIN PIPELINE
 # ==========================================
 
 def main():
@@ -597,6 +757,37 @@ def main():
 
     # 7. SHAP Feature Summary
     ranked_features = print_feature_importance(shap_values)
+    
+    # ---------------------------------------------------------
+    # NEW: SHAP STATISTICAL VALIDATION
+    # ---------------------------------------------------------
+
+    # 8. Statistical Significance of SHAP (Slow gold standard permutation test)
+    shap_pvalues = compute_shap_pvalues(
+        X_train=X_train, 
+        y_train=y_train, 
+        X_test=X_test, 
+        true_shap_values=shap_values, 
+        feature_names=feature_names, 
+        n_permutations=50 # Increase to 100 or 500 for more robust (but slower) results
+    )
+
+    # 9. SHAP Shadow Feature Analysis (Extremely Fast)
+    shadow_results = compute_shap_shadow_features(
+        X_train=X_train, 
+        y_train=y_train, 
+        X_test=X_test, 
+        feature_names=feature_names
+    )
+
+    # 10. SHAP Bootstrapping / Confidence Intervals (Shows Stability)
+    bootstrap_results = compute_shap_bootstrapping(
+        X_train=X_train, 
+        y_train=y_train, 
+        X_test=X_test, 
+        feature_names=feature_names,
+        n_bootstraps=30 # Adjust based on how long you want to wait
+    )
 
 if __name__ == "__main__":
     main()
