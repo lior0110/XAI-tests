@@ -6,6 +6,8 @@ import matplotlib.pyplot as plt
 import statsmodels.api as sm
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
+from scipy.stats import spearmanr
+import gc
 
 # ==========================================
 # 1. SYNTHETIC DATA GENERATION FUNCTIONS
@@ -13,21 +15,25 @@ from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 
 def generate_linear_synthetic_data(num_inputs: int = 10, num_samples: int = 5000, 
                             num_contributing_features: tuple[int, int] = (2, 5), 
+                            input_range: tuple[float, float] = (-1.0, 1.0),
                             weight_range: tuple[float, float] = (-3, 3), 
-                            noise_std: float = 0.05, 
-                            ) -> tuple[pd.DataFrame, np.ndarray, list[str]]:
+                            noise_std: float = 0.05,
+                            ) -> tuple[pd.DataFrame, np.ndarray, list[str], dict[str, float]]:
     """Generates synthetic data with a random linear combination of features."""
     m_inputs = np.random.randint(num_contributing_features[0], num_contributing_features[1] + 1)
     input_indices = np.random.choice(num_inputs, m_inputs, replace=False)
     weights = np.random.uniform(weight_range[0], weight_range[1], m_inputs)
 
-    # Sort features by absolute weight (contribution)
     sorted_features = sorted(zip(input_indices, weights), key=lambda x: abs(x[1]), reverse=True)
     
-    # Build Equation String
     equation_parts = []
+    true_linear_weights = {}
+    
     for idx, w in sorted_features:
-        equation_parts.append(f"({w:.4f} * Feature_{idx})")
+        feat_name = f"Feature_{idx}"
+        equation_parts.append(f"({w:.4f} * {feat_name})")
+        true_linear_weights[feat_name] = float(w)
+
     equation_str = "y = " + " + ".join(equation_parts) + f" + Noise(0, {noise_std})"
 
     print("--- Generative Model Info ---")
@@ -37,55 +43,71 @@ def generate_linear_synthetic_data(num_inputs: int = 10, num_samples: int = 5000
     print("-" * 39 + "\n")
 
     feature_names = [f"Feature_{i}" for i in range(num_inputs)]
-    X = pd.DataFrame(np.random.rand(num_samples, num_inputs), columns=feature_names)
+    X = pd.DataFrame(np.random.uniform(input_range[0], input_range[1], (num_samples, num_inputs)), columns=feature_names)
 
     y = np.zeros(num_samples)
     for idx, w in zip(input_indices, weights):
         y += w * X[f"Feature_{idx}"]
 
-    # Add noise
     y += np.random.normal(0, noise_std, num_samples)
     
-    return X, y, feature_names
+    return X, y, feature_names, true_linear_weights
 
 
 def generate_synthetic_data_with_interactions(num_inputs: int = 10, num_samples: int = 5000, 
                             num_contributing_features: tuple[int, int] = (2, 5), 
+                            input_range: tuple[float, float] = (-1.0, 1.0),
                             weight_range: tuple[float, float] = (-3, 3), 
                             num_interactions: tuple[int, int] = (1, 2), 
                             interaction_weight_range: tuple[float, float] = (-3, 3), 
-                            noise_std: float = 0.05, 
-                            ) -> tuple[pd.DataFrame, np.ndarray, list[str]]:
+                            noise_std: float = 0.05,
+                            ) -> tuple[pd.DataFrame, np.ndarray, list[str], dict[str, float], dict[str, float | list[float]]]:
     """Generates synthetic data with linear combinations AND 1-2 feature interactions."""
-    # 1. Linear components
     m_inputs = np.random.randint(num_contributing_features[0], num_contributing_features[1] + 1)
     linear_indices = np.random.choice(num_inputs, m_inputs, replace=False)
     linear_weights = np.random.uniform(weight_range[0], weight_range[1], m_inputs)
     sorted_linear = sorted(zip(linear_indices, linear_weights), key=lambda x: abs(x[1]), reverse=True)
 
-    # 2. Interaction components (1 to 2 interactions)
     num_interactions = np.random.randint(num_interactions[0], num_interactions[1] + 1)
     interactions = []
     for _ in range(num_interactions):
-        # Pick 2 distinct features for the interaction pair
         pair = np.random.choice(num_inputs, 2, replace=False)
         weight = np.random.uniform(interaction_weight_range[0], interaction_weight_range[1], 1)[0]
-        # Sort the pair indices just so "Feature_2 * Feature_1" prints as "Feature_1 * Feature_2"
         pair = sorted(pair) 
         interactions.append((pair[0], pair[1], weight))
 
     sorted_interactions = sorted(interactions, key=lambda x: abs(x[2]), reverse=True)
 
-    # 3. Build Equation String
     equation_parts = []
+    true_linear_weights = {}
+    true_interaction_weights = {}
+
+    def add_interaction_weight(feat, w):
+        if feat in true_interaction_weights:
+            if isinstance(true_interaction_weights[feat], list):
+                true_interaction_weights[feat].append(w)
+            else:
+                true_interaction_weights[feat] = [true_interaction_weights[feat], w]
+        else:
+            true_interaction_weights[feat] = w
+
     for idx, w in sorted_linear:
-        equation_parts.append(f"({w:.4f} * Feature_{idx})")
+        feat_name = f"Feature_{idx}"
+        equation_parts.append(f"({w:.4f} * {feat_name})")
+        true_linear_weights[feat_name] = float(w)
+        
     for i, j, w in sorted_interactions:
-        equation_parts.append(f"({w:.4f} * Feature_{i} * Feature_{j})")
+        feat_i = f"Feature_{i}"
+        feat_j = f"Feature_{j}"
+        pair_name = f"{feat_i} * {feat_j}"
+        equation_parts.append(f"({w:.4f} * {pair_name})")
+        
+        # Add the weight to both individual features in the interaction dictionary
+        add_interaction_weight(feat_i, float(w))
+        add_interaction_weight(feat_j, float(w))
         
     equation_str = "y = " + " + ".join(equation_parts) + f" + Noise(0, {noise_std})"
 
-    # Print Truth
     print("--- Generative Model Info (With Interactions) ---")
     print(f"Number of linear variables (M): {m_inputs}")
     print(f"Number of interaction terms: {num_interactions}")
@@ -93,25 +115,19 @@ def generate_synthetic_data_with_interactions(num_inputs: int = 10, num_samples:
     print(equation_str)
     print("-" * 49 + "\n")
 
-    # Generate X
     feature_names = [f"Feature_{i}" for i in range(num_inputs)]
-    X = pd.DataFrame(np.random.rand(num_samples, num_inputs), columns=feature_names)
+    X = pd.DataFrame(np.random.uniform(input_range[0], input_range[1], (num_samples, num_inputs)), columns=feature_names)
 
-    # 4. Calculate y
     y = np.zeros(num_samples)
-    
-    # Add linear terms
     for idx, w in zip(linear_indices, linear_weights):
         y += w * X[f"Feature_{idx}"]
         
-    # Add interaction terms (w * Xi * Xj)
     for i, j, w in interactions:
         y += w * (X[f"Feature_{i}"] * X[f"Feature_{j}"])
 
-    # Add noise
     y += np.random.normal(0, noise_std, num_samples)
     
-    return X, y, feature_names
+    return X, y, feature_names, true_linear_weights, true_interaction_weights
 
 
 def generate_synthetic_data_with_hidden_features(
@@ -123,31 +139,38 @@ def generate_synthetic_data_with_hidden_features(
     num_interactions: tuple[int, int] = (1, 2), 
     interaction_weight_range: tuple[float, float] = (-3, 3), 
     noise_std: float = 0.05, 
-    hidden_in_linear: bool = True,           # NEW: Should hidden features have a linear impact?
-    hidden_in_interactions: bool = True      # NEW: Should hidden features be part of interactions?
-) -> tuple[pd.DataFrame, pd.DataFrame, np.ndarray, list[str], list[str]]:
-    """Generates synthetic data where hidden features impact 'y' based on user demand."""
-    
+    hidden_in_linear: bool = True,
+    hidden_in_interactions: bool = True,
+    input_range: tuple[float, float] = (-1.0, 1.0),
+    missing_pct: float = 0.0,
+    error_pct: float = 0.0
+) -> tuple[pd.DataFrame, pd.DataFrame, np.ndarray, list[str], list[str], dict[str, float], dict[str, float | list[float]]]:
+    """Generates synthetic data where hidden features impact 'y' based on user demand, with optional missing/error noise."""
     if not hidden_in_linear and not hidden_in_interactions:
         print("WARNING: Hidden features are excluded from both linear and interaction parts. They will not impact 'y'.")
 
-    # 1. Determine counts
-    m_inputs = np.random.randint(num_contributing_features[0], num_contributing_features[1] + 1)
-    n_hidden = np.random.randint(num_hidden_features[0], num_hidden_features[1] + 1)
-    total_features = num_inputs + n_hidden
+    # 1. Determine Total Counts
+    total_linear_features = np.random.randint(num_contributing_features[0], num_contributing_features[1] + 1)
+    n_hidden_total = np.random.randint(num_hidden_features[0], num_hidden_features[1] + 1)
+    total_features_dataset = num_inputs + n_hidden_total
     
     def get_feat_name(idx):
         return f"Feature_{idx}" if idx < num_inputs else f"Hidden_{idx - num_inputs}"
 
-    # 2. Linear components
-    visible_indices = np.random.choice(num_inputs, m_inputs, replace=False)
-    hidden_indices = np.arange(num_inputs, total_features) 
-    
-    # Apply hidden features to linear terms if requested
+    # 2. Linear components (Split total between visible and hidden)
     if hidden_in_linear:
+        m_visible_linear = np.random.randint(max(1, total_linear_features - n_hidden_total), total_linear_features)
+        n_hidden_linear = total_linear_features - m_visible_linear
+        
+        visible_indices = np.random.choice(num_inputs, m_visible_linear, replace=False)
+        hidden_pool = np.arange(num_inputs, total_features_dataset)
+        hidden_indices = np.random.choice(hidden_pool, n_hidden_linear, replace=False)
+        
         all_contributing_indices = np.concatenate([visible_indices, hidden_indices])
     else:
-        all_contributing_indices = visible_indices
+        m_visible_linear = total_linear_features
+        n_hidden_linear = 0
+        all_contributing_indices = np.random.choice(num_inputs, m_visible_linear, replace=False)
         
     linear_weights = np.random.uniform(weight_range[0], weight_range[1], len(all_contributing_indices))
     sorted_linear = sorted(zip(all_contributing_indices, linear_weights), key=lambda x: abs(x[1]), reverse=True)
@@ -155,51 +178,70 @@ def generate_synthetic_data_with_hidden_features(
     # 3. Interaction components
     n_interactions = np.random.randint(num_interactions[0], num_interactions[1] + 1)
     interactions = []
+    hidden_interaction_count = 0 
     
     for i in range(n_interactions):
-        if hidden_in_interactions and i == 0 and n_hidden > 0:
-            # Force the first interaction to explicitly include a hidden feature
-            h_feat = np.random.choice(hidden_indices)
-            other_pool = list(range(total_features))
+        if hidden_in_interactions and i == 0 and n_hidden_total > 0:
+            h_feat = np.random.choice(np.arange(num_inputs, total_features_dataset))
+            other_pool = list(range(total_features_dataset))
             other_pool.remove(h_feat)
             other_feat = np.random.choice(other_pool)
             pair = sorted([h_feat, other_feat])
+            hidden_interaction_count += 1
         elif hidden_in_interactions:
-            # Allow any combination (Visible*Visible, Visible*Hidden, Hidden*Hidden)
-            pair = sorted(np.random.choice(total_features, 2, replace=False))
+            pair = sorted(np.random.choice(total_features_dataset, 2, replace=False))
+            if pair[0] >= num_inputs or pair[1] >= num_inputs:
+                hidden_interaction_count += 1
         else:
-            # Strictly Visible*Visible interactions
             pair = sorted(np.random.choice(num_inputs, 2, replace=False))
             
         weight = np.random.uniform(interaction_weight_range[0], interaction_weight_range[1])
         interactions.append((pair[0], pair[1], weight))
 
-    # 4. Build the True Equation String
+    # 4. Build Equation and Ground Truth Dictionaries
     equation_parts = []
+    true_linear_weights = {}
+    true_interaction_weights = {}
+
+    def add_interaction_weight(feat, w):
+        if feat in true_interaction_weights:
+            if isinstance(true_interaction_weights[feat], list):
+                true_interaction_weights[feat].append(w)
+            else:
+                true_interaction_weights[feat] = [true_interaction_weights[feat], w]
+        else:
+            true_interaction_weights[feat] = w
+
     for idx, w in sorted_linear:
-        equation_parts.append(f"({w:.4f} * {get_feat_name(idx)})")
+        feat_name = get_feat_name(idx)
+        equation_parts.append(f"({w:.4f} * {feat_name})")
+        true_linear_weights[feat_name] = float(w)
         
     sorted_interactions = sorted(interactions, key=lambda x: abs(x[2]), reverse=True)
     for i, j, w in sorted_interactions:
-        equation_parts.append(f"({w:.4f} * {get_feat_name(i)} * {get_feat_name(j)})")
+        feat_i = get_feat_name(i)
+        feat_j = get_feat_name(j)
+        pair_name = f"{feat_i} * {feat_j}"
+        equation_parts.append(f"({w:.4f} * {pair_name})")
+        
+        add_interaction_weight(feat_i, float(w))
+        add_interaction_weight(feat_j, float(w))
         
     equation_str = "y = " + " + ".join(equation_parts) + f" + Noise(0, {noise_std})"
 
-    # Print Truth
     print("--- Generative Model Info (With HIDDEN Features) ---")
-    print(f"Number of linear variables: {len(all_contributing_indices)} ({m_inputs} visible, {n_hidden if hidden_in_linear else 0} hidden)")
-    print(f"Number of interaction terms: {n_interactions}")
+    print(f"Total linear variables:  {total_linear_features} ({m_visible_linear} visible, {n_hidden_linear} hidden)")
+    print(f"Total interaction terms: {n_interactions} ({n_interactions - hidden_interaction_count} pure visible, {hidden_interaction_count} involving hidden)")
     print("\n--- True Mathematical Equation ---")
     print(equation_str)
     print("-" * 52 + "\n")
 
-    # 5. Generate the full dataset
-    full_feature_names = [get_feat_name(i) for i in range(total_features)]
-    X_full = pd.DataFrame(np.random.rand(num_samples, total_features), columns=full_feature_names)
+    # 5. Generate clean data
+    full_feature_names = [get_feat_name(i) for i in range(total_features_dataset)]
+    X_full = pd.DataFrame(np.random.uniform(input_range[0], input_range[1], (num_samples, total_features_dataset)), columns=full_feature_names)
 
-    # 6. Calculate y
+    # 6. Calculate y perfectly based on clean data
     y = np.zeros(num_samples)
-    
     for idx, w in zip(all_contributing_indices, linear_weights):
         y += w * X_full[get_feat_name(idx)]
         
@@ -208,45 +250,91 @@ def generate_synthetic_data_with_hidden_features(
 
     y += np.random.normal(0, noise_std, num_samples)
     
-    # 7. Split X into visible and hidden DataFrames
+    # 7. Apply Missing and Error rates to the input features (X) AFTER calculating y
+    total_cells = num_samples * total_features_dataset
+    num_missing = int(total_cells * missing_pct)
+    num_error = int(total_cells * error_pct)
+    
+    if num_missing > 0 or num_error > 0:
+        X_arr = X_full.to_numpy()
+        
+        # Pick random distinct locations to corrupt
+        corrupt_indices = np.random.choice(total_cells, num_missing + num_error, replace=False)
+        missing_indices = corrupt_indices[:num_missing]
+        error_indices = corrupt_indices[num_missing:]
+        
+        # Inject NaN values
+        if num_missing > 0:
+            X_arr.flat[missing_indices] = np.nan
+            
+        # Inject Error values (Resampled from the same distribution as the input data)
+        if num_error > 0:
+            X_arr.flat[error_indices] = np.random.uniform(input_range[0], input_range[1], size=num_error)
+
+        # Re-assign back to DataFrame
+        X_full = pd.DataFrame(X_arr, columns=full_feature_names)
+
+    # 8. Split X into visible and hidden DataFrames
     visible_feature_names = [f"Feature_{i}" for i in range(num_inputs)]
-    hidden_feature_names = [f"Hidden_{i}" for i in range(n_hidden)]
+    hidden_feature_names = [f"Hidden_{i}" for i in range(n_hidden_total)]
     
     X_visible = X_full[visible_feature_names].copy()
     X_hidden = X_full[hidden_feature_names].copy()
     
-    return X_visible, X_hidden, y, visible_feature_names, hidden_feature_names
-
+    return X_visible, X_hidden, y, visible_feature_names, hidden_feature_names, true_linear_weights, true_interaction_weights
 
 # ==========================================
 # 2. MODELING & EVALUATION FUNCTIONS
 # ==========================================
 
-def perform_traditional_regression(X_train: pd.DataFrame, y_train: np.ndarray, pvalue_threshold: float = 0.05
-                                   ) -> tuple[sm.regression.linear_model.RegressionResultsWrapper, dict[str, dict[str, float]]]:
-    """Performs traditional OLS regression to find significant features and their coefficients."""
-    print("\n--- Traditional Regression Analysis (OLS) ---")
+def perform_traditional_regression(X: pd.DataFrame, y: np.ndarray, pvalue_threshold: float = 0.05, use_bonferroni: bool = True, nan_strategy: str = "impute_mean"):
+    """
+    Performs traditional Ordinary Least Squares (OLS) regression using statsmodels.
+    Handles NaN values and extracts statistically significant features.
+    """
+    print(f"\n--- Traditional OLS Regression (NaN Strategy: {nan_strategy}) ---")
     
-    # Add a constant term for the intercept (statsmodels requires this explicitly)
-    X_train_sm = sm.add_constant(X_train)
+    if use_bonferroni:
+        pvalue_threshold = pvalue_threshold / X.shape[1]
+        print(f"Bonferroni correction applied: Adjusted p-value threshold = {pvalue_threshold:.4e}")
+
+    # 1. Handle Missing Values
+    if X.isna().sum().sum() > 0:
+        print(f"Warning: {X.isna().sum().sum()} missing values detected in X.")
+        
+        if nan_strategy == "drop":
+            valid_rows_mask = ~X.isna().any(axis=1)
+            X_clean = X[valid_rows_mask].copy()
+            y_clean = y[valid_rows_mask].copy() if isinstance(y, np.ndarray) else y[valid_rows_mask].copy()
+            print(f"Dropped {len(X) - len(X_clean)} rows containing NaNs.")
+            
+        elif nan_strategy == "impute_mean":
+            X_clean = X.fillna(X.mean())
+            y_clean = y.copy()
+            print("Imputed missing values with column means.")
+            
+        else:
+            raise ValueError("nan_strategy must be either 'drop' or 'impute_mean'")
+    else:
+        X_clean = X.copy()
+        y_clean = y.copy()
+        
+    # 2. Add a constant (intercept) to the model
+    X_clean_sm = sm.add_constant(X_clean)
     
-    # Fit the Ordinary Least Squares (OLS) model
-    ols_model = sm.OLS(y_train, X_train_sm).fit()
-    
-    # Print the traditional statistical summary (this is what you'd see in R or SAS)
+    # 3. Fit the OLS model
+    ols_model = sm.OLS(y_clean, X_clean_sm).fit()
     print(ols_model.summary())
     
-    # Extract coefficients and confidence intervals (excluding the intercept 'const')
+    # 4. Extract coefficients and calculate significant features
     coefs = ols_model.params.drop('const')
     pvalues = ols_model.pvalues.drop('const')
     conf_int = ols_model.conf_int().drop('const')
 
-    # Identify statistically significant features (p < pvalue_threshold)
     sig_mask = pvalues < pvalue_threshold
     sig_pvalues = pvalues[sig_mask]
     sig_coefs = coefs[sig_mask]
     
-    # Create the dictionary of significant features
     unsorted_sig_features = {}
     for feat in sig_pvalues.index:
         unsorted_sig_features[feat] = {
@@ -254,7 +342,6 @@ def perform_traditional_regression(X_train: pd.DataFrame, y_train: np.ndarray, p
             'coefficient': sig_coefs[feat]
         }
         
-    # Sort the dictionary by p-value (ascending: most significant first)
     significant_features = dict(sorted(unsorted_sig_features.items(), key=lambda item: item[1]['pvalue']))
 
     print("\n" + "="*50)
@@ -266,11 +353,10 @@ def perform_traditional_regression(X_train: pd.DataFrame, y_train: np.ndarray, p
         print(f"  None detected at p < {pvalue_threshold}")
     print("="*50 + "\n")
     
-    # Calculate error margins for the plot
+    # 5. Plotting Coefficients with 95% Confidence Intervals
     lower_errors = coefs - conf_int[0]
     upper_errors = conf_int[1] - coefs
     
-    # Plotting Coefficients with 95% Confidence Intervals
     plt.figure(figsize=(10, 6))
     plt.errorbar(coefs.index, coefs, yerr=[lower_errors, upper_errors], 
                  fmt='o', color='#D81B60', ecolor='lightgray', elinewidth=3, capsize=5)
@@ -285,19 +371,51 @@ def perform_traditional_regression(X_train: pd.DataFrame, y_train: np.ndarray, p
     
     return ols_model, significant_features
 
-
-def train_xgb_model(X: pd.DataFrame, y: np.ndarray, test_size: float = 0.2, random_state: int = 4,
-                    ) -> tuple[xgb.XGBRegressor, pd.DataFrame, pd.DataFrame]:
-    """Splits data and trains a basic XGBoost Regressor."""
+def train_xgb_model(
+    X: pd.DataFrame, 
+    y: np.ndarray, 
+    test_size: float = 0.2, 
+    random_state: int = None,
+    **xgb_kwargs
+) -> tuple[xgb.XGBRegressor, pd.DataFrame, pd.DataFrame, np.ndarray, np.ndarray]:
+    """
+    Splits data and trains an XGBoost Regressor.
+    
+    Args:
+        X: Input features.
+        y: Target variable.
+        test_size: Proportion of data to use for testing.
+        random_state: Random seed for splitting.
+        **xgb_kwargs: Any valid parameters for xgb.XGBRegressor 
+                      (e.g., n_estimators, max_depth, reg_alpha, etc.)
+    """
+    print("\n--- Training XGBoost Model ---")
+    
+    # 1. Split the data
     X_train, X_test, y_train, y_test = train_test_split(
         X, y, test_size=test_size, random_state=random_state
     )
 
-    model = xgb.XGBRegressor(n_estimators=100, max_depth=3, learning_rate=0.1)
+    # 2. Define default parameters
+    # We explicitly set missing=np.nan to leverage XGBoost's native missing value handling
+    params = {
+        'n_estimators': 100,
+        'max_depth': 3,
+        'learning_rate': 0.1,
+        'missing': np.nan, 
+        'random_state': random_state
+    }
+    
+    # 3. Overwrite/add any parameters passed in via **xgb_kwargs
+    params.update(xgb_kwargs)
+    
+    # 4. Initialize and fit the model
+    model = xgb.XGBRegressor(**params)
     model.fit(X_train, y_train)
     
-    return model, X_train, X_test
-
+    print(f"Model trained with parameters: {params}")
+    
+    return model, X_train, X_test, y_train, y_test
 
 def evaluate_xgb_model(model: xgb.XGBRegressor, X_test: pd.DataFrame, y_test: np.ndarray) -> None:
     """Evaluates the XGBoost model and prints regression metrics."""
@@ -319,6 +437,128 @@ def evaluate_xgb_model(model: xgb.XGBRegressor, X_test: pd.DataFrame, y_test: np
     print(f"Mean Absolute Error (MAE):      {mae:.4f}")
     print("-" * 37 + "\n")
 
+def evaluate_feature_discovery(
+    significant_features: dict | list | str, 
+    true_linear_weights: dict[str, float], 
+    true_interaction_weights: dict[str, float | list[float]]
+) -> dict:
+    """
+    Evaluates how well the ML model discovered the true generative features.
+    Provides separate recall metrics for linear vs. interaction features.
+    """
+    def _extract_score(val):
+        try:
+            if isinstance(val, dict):
+                for k in ['importance', 'score', 'shap_value', 'weight', 'mean_abs_shap']:
+                    if k in val: return float(val[k])
+                return float(list(val.values())[0])
+            elif isinstance(val, (list, tuple, np.ndarray)):
+                return float(val[0])
+            return float(val)
+        except Exception:
+            return 1.0
+
+    # 1. Standardize Model Output
+    if isinstance(significant_features, str):
+        model_features = [f.strip() for f in significant_features.split(',')]
+        model_importances = {f: 1.0 for f in model_features}
+    elif isinstance(significant_features, list):
+        model_features = significant_features
+        model_importances = {f: 1.0 for f in model_features}
+    elif isinstance(significant_features, dict):
+        model_features = list(significant_features.keys())
+        model_importances = significant_features
+    else:
+        raise ValueError("significant_features must be a dict, list, or string.")
+        
+    # 2. Extract Ground Truth Sets (Excluding Hidden Features)
+    true_linear_set = {f for f in true_linear_weights.keys() if not f.startswith("Hidden")}
+    true_interaction_set = {f for f in true_interaction_weights.keys() if not f.startswith("Hidden")}
+    
+    true_features_set = true_linear_set.union(true_interaction_set)
+    model_features_set = set(model_features)
+    
+    # 3. Calculate Global Metrics
+    true_positives = true_features_set.intersection(model_features_set)
+    false_positives = model_features_set - true_features_set
+    false_negatives = true_features_set - model_features_set
+    
+    tp_count = len(true_positives)
+    fp_count = len(false_positives)
+    fn_count = len(false_negatives)
+    
+    precision = tp_count / len(model_features_set) if len(model_features_set) > 0 else 0.0
+    recall_overall = tp_count / len(true_features_set) if len(true_features_set) > 0 else 0.0
+    f1_score = 2 * (precision * recall_overall) / (precision + recall_overall) if (precision + recall_overall) > 0 else 0.0
+    
+    # 4. Calculate Specific Recalls (Linear vs Interaction)
+    linear_hits = true_linear_set.intersection(model_features_set)
+    interaction_hits = true_interaction_set.intersection(model_features_set)
+    
+    # If there are no linear/interaction features in the ground truth, we consider recall to be N/A (1.0)
+    recall_linear = len(linear_hits) / len(true_linear_set) if len(true_linear_set) > 0 else 1.0
+    recall_interaction = len(interaction_hits) / len(true_interaction_set) if len(true_interaction_set) > 0 else 1.0
+
+    # 5. Calculate Aggregate True Weights (For Ranking Analysis)
+    true_aggregate_importance = {}
+    for f in true_features_set:
+        imp = 0.0
+        if f in true_linear_weights:
+            imp += abs(true_linear_weights[f])
+        if f in true_interaction_weights:
+            w_int = true_interaction_weights[f]
+            if isinstance(w_int, list):
+                imp += sum(abs(x) for x in w_int)
+            else:
+                imp += abs(w_int)
+        true_aggregate_importance[f] = imp
+        
+    # 6. Rank Correlation (Spearman)
+    correlation, p_value = None, None
+    if isinstance(significant_features, dict) and len(true_positives) > 1:
+        shared_features = list(true_positives)
+        true_scores = [true_aggregate_importance[f] for f in shared_features]
+        model_scores = [abs(_extract_score(model_importances[f])) for f in shared_features]
+        
+        if len(set(model_scores)) == 1:
+             model_scores = [s + np.random.normal(0, 1e-10) for s in model_scores]
+
+        correlation, p_value = spearmanr(true_scores, model_scores)
+
+    # 7. Print Summary
+    print("\n" + "="*50)
+    print("           FEATURE DISCOVERY EVALUATION")
+    print("="*50)
+    print(f"Total True (Visible) Features: {len(true_features_set)}")
+    print(f"  ├─ Purely Linear / Main:     {len(true_linear_set)}")
+    print(f"  └─ Involved in Interactions: {len(true_interaction_set)}")
+    print(f"Total Model Features Found:    {len(model_features_set)}")
+    print("-" * 50)
+    print(f"True Positives (Correct): {tp_count} -> {list(true_positives)}")
+    print(f"False Positives (Noise):  {fp_count} -> {list(false_positives)}")
+    print(f"False Negatives (Missed): {fn_count} -> {list(false_negatives)}")
+    print("-" * 50)
+    print(f"Precision:            {precision:.4f}")
+    print(f"Overall Recall:       {recall_overall:.4f}")
+    print(f"  ├─ Linear Recall:   {recall_linear:.4f}  (Found {len(linear_hits)}/{len(true_linear_set)})")
+    print(f"  └─ Interact Recall: {recall_interaction:.4f}  (Found {len(interaction_hits)}/{len(true_interaction_set)})")
+    print(f"F1-Score:             {f1_score:.4f}")
+    
+    if correlation is not None:
+        print(f"Rank Correlation:     {correlation:.4f} (p-val: {p_value:.4f})")
+    print("="*50 + "\n")
+
+    return {
+        "precision": precision,
+        "recall_overall": recall_overall,
+        "recall_linear": recall_linear,
+        "recall_interaction": recall_interaction,
+        "f1_score": f1_score,
+        "true_positives": list(true_positives),
+        "false_positives": list(false_positives),
+        "false_negatives": list(false_negatives),
+        "spearman_correlation": correlation
+    }
 
 # ==========================================
 # 3. PLOTTING & SHAP EXPLAINABILITY FUNCTIONS
@@ -351,31 +591,44 @@ def compute_shap_values(model: xgb.XGBRegressor, X_train: pd.DataFrame, X_test: 
     
     return shap_values
 
-def plot_shap_analysis(shap_values: shap.Explanation, feature_names: list[str]) -> None:
-    """Generates the beeswarm plot and detailed feature dependence plots with improvements."""
-    # 1. Beeswarm Plot
+def plot_shap_analysis(shap_values: shap.Explanation, feature_names: list[str], top_n: int = 5) -> None:
+    """
+    Generates beeswarm and detailed dependence plots for the top N most important features.
+    """
+    # 1. Identify Top N Features based on mean absolute SHAP
+    global_importances = np.abs(shap_values.values).mean(0)
+    # Get indices of top_n features, sorted descending
+    top_indices = np.argsort(global_importances)[-top_n:][::-1]
+    
+    # Update count in case top_n is larger than available features
+    num_to_plot = len(top_indices)
+    plot_feature_names = [feature_names[i] for i in top_indices]
+
+    print(f"Plotting SHAP analysis for top {num_to_plot} features: {plot_feature_names}")
+
+    # 2. Beeswarm Plot (automatically handles top_n via max_display)
     plt.figure(figsize=(10, 6))
-    plt.title("SHAP Beeswarm Plot")
-    shap.plots.beeswarm(shap_values)
+    plt.title(f"SHAP Beeswarm Plot (Top {num_to_plot})")
+    shap.plots.beeswarm(shap_values, max_display=num_to_plot + 1)
     plt.show()
 
-    # 2. Feature Dependence Plots
-    num_features = len(feature_names)
+    # 3. Feature Dependence Plots Setup
     cols = 5
-    rows = (num_features + cols - 1) // cols 
+    rows = (num_to_plot + cols - 1) // cols 
 
-    # Using sharey=True to standardize vertical scales across each row
-    fig1, axes1 = plt.subplots(nrows=rows, ncols=cols, figsize=(20, 4 * rows), sharey=True)
-    fig2, axes2 = plt.subplots(nrows=rows, ncols=cols, figsize=(20, 4 * rows), sharey=True)
-    fig3, axes3 = plt.subplots(nrows=rows, ncols=cols, figsize=(20, 4 * rows), sharey=True)
+    fig1, axes1 = plt.subplots(nrows=rows, ncols=cols, figsize=(20, 4 * rows), squeeze=False, sharey=True)
+    fig2, axes2 = plt.subplots(nrows=rows, ncols=cols, figsize=(20, 4 * rows), squeeze=False, sharey=True)
+    fig3, axes3 = plt.subplots(nrows=rows, ncols=cols, figsize=(20, 4 * rows), squeeze=False, sharey=True)
 
     axes1, axes2, axes3 = axes1.flatten(), axes2.flatten(), axes3.flatten()
 
-    for i, feature in enumerate(feature_names):
-        x_vals = shap_values.data[:, i]
-        y_vals = shap_values.values[:, i]
+    # 4. Iterate only through the top indices
+    for plot_idx, original_feat_idx in enumerate(top_indices):
+        feature = feature_names[original_feat_idx]
+        x_vals = shap_values.data[:, original_feat_idx]
+        y_vals = shap_values.values[:, original_feat_idx]
         
-        # Adaptive Epsilon based on standard deviation
+        # Adaptive Epsilon for normalization
         x_std = np.std(x_vals)
         epsilon = 1e-3 * x_std if x_std > 0 else 1e-3
         
@@ -384,20 +637,19 @@ def plot_shap_analysis(shap_values: shap.Explanation, feature_names: list[str]) 
         sort_idx = np.argsort(x_vals)
         x_sorted, y_sorted = x_vals[sort_idx], y_vals[sort_idx]
         
-        # Clipping the derivative to fix divide-by-zero spikes
+        # Derivative Calculation
         dx = x_sorted[1:] - x_sorted[:-1] + epsilon
         dy = y_sorted[1:] - y_sorted[:-1]
         raw_derivative = dy / dx
         
-        # Clip between 1st and 99th percentiles to keep sharey=True from exploding
         lower_bound = np.percentile(raw_derivative, 1)
         upper_bound = np.percentile(raw_derivative, 99)
         y_vals_normalize2 = np.clip(raw_derivative, lower_bound, upper_bound)
 
-        # Color by a highly correlated interaction proxy
+        # Interaction Proxy (Calculated against all features for best context)
         correlations = []
-        for j in range(num_features):
-            if j == i or np.std(shap_values.data[:, j]) == 0:
+        for j in range(len(feature_names)):
+            if j == original_feat_idx or np.std(shap_values.data[:, j]) == 0:
                 correlations.append(0)
             else:
                 corr = np.corrcoef(y_vals, shap_values.data[:, j])[0, 1]
@@ -406,37 +658,29 @@ def plot_shap_analysis(shap_values: shap.Explanation, feature_names: list[str]) 
         interact_idx = np.argmax(np.abs(correlations))
         c_vals = shap_values.data[:, interact_idx]
         interact_name = feature_names[interact_idx]
-
-        # FIXED: Sort the color array to match x_sorted, and drop the last element for the derivative
         c_sorted = c_vals[sort_idx]
 
         plot_kwargs_main = {'alpha': 0.4, 's': 10, 'c': c_vals, 'cmap': 'coolwarm'}
         plot_kwargs_deriv = {'alpha': 0.4, 's': 10, 'c': c_sorted[:-1], 'cmap': 'coolwarm'}
 
-        # Plot 1: Standard SHAP
-        axes1[i].scatter(x_vals, y_vals, **plot_kwargs_main)
-        axes1[i].set(title=f"SHAP vs {feature}", xlabel="Feature")
-        if i % cols == 0: axes1[i].set_ylabel("SHAP")
-
-        # Plot 2: Normalized SHAP
-        axes2[i].scatter(x_vals, y_vals_normalize, **plot_kwargs_main)
-        axes2[i].set(title=f"SHAP/Feature vs {feature}", xlabel="Feature")
-        if i % cols == 0: axes2[i].set_ylabel("SHAP / Feature")
-
-        # Plot 3: Derivative (Uses the sorted, N-1 color array)
-        axes3[i].scatter(x_sorted[:-1], y_vals_normalize2, **plot_kwargs_deriv)
-        axes3[i].set(title=f"d(SHAP)/d(Feature)", xlabel="Feature")
-        if i % cols == 0: axes3[i].set_ylabel("Derivative")
+        # Plotting
+        axes1[plot_idx].scatter(x_vals, y_vals, **plot_kwargs_main)
+        axes1[plot_idx].set(title=f"SHAP vs {feature}", xlabel="Value")
         
-        # Add a zero reference line and a text box showing the interaction color variable
-        for ax in [axes1[i], axes2[i], axes3[i]]:
+        axes2[plot_idx].scatter(x_vals, y_vals_normalize, **plot_kwargs_main)
+        axes2[plot_idx].set(title=f"SHAP/Feat vs {feature}", xlabel="Value")
+
+        axes3[plot_idx].scatter(x_sorted[:-1], y_vals_normalize2, **plot_kwargs_deriv)
+        axes3[plot_idx].set(title=f"d(SHAP)/d({feature})", xlabel="Value")
+        
+        for ax in [axes1[plot_idx], axes2[plot_idx], axes3[plot_idx]]:
             ax.axhline(0, color='gray', linestyle='--', linewidth=1)
             ax.text(0.05, 0.95, f"Color: {interact_name}", transform=ax.transAxes, 
                     fontsize=8, verticalalignment='top', 
                     bbox=dict(boxstyle='round', facecolor='white', alpha=0.8, edgecolor='lightgray'))
 
     # Clean up empty subplots
-    for j in range(num_features, len(axes1)):
+    for j in range(num_to_plot, len(axes1)):
         fig1.delaxes(axes1[j])
         fig2.delaxes(axes2[j])
         fig3.delaxes(axes3[j])
@@ -529,11 +773,71 @@ def analyze_shap_interactions(model: xgb.XGBRegressor, X_test: pd.DataFrame, fea
 
     return sorted_interactions
 
+
+
+def analyze_shap_interactions_memory_efficient(model, X_test, feature_names, max_samples=500, batch_size=50):
+    """
+    Memory-efficient SHAP interaction analysis using batching and subsampling.
+    """
+    print(f"\n--- Computing SHAP Interaction Values (Memory Efficient) ---")
+    
+    # 1. Subsample X_test if it is too large
+    if len(X_test) > max_samples:
+        print(f"Subsampling X_test from {len(X_test)} to {max_samples} for efficiency.")
+        X_sub = X_test.sample(n=max_samples, random_state=42)
+    else:
+        X_sub = X_test
+
+    explainer = shap.TreeExplainer(model)
+    n_features = len(feature_names)
+    
+    # Initialize accumulator for mean absolute interaction values (Global Importance)
+    # This matrix is only (3000, 3000), which is ~36MB - very safe.
+    global_interaction_matrix = np.zeros((n_features, n_features))
+    
+    # 2. Process in batches to avoid 'Bad Allocation'
+    for i in range(0, len(X_sub), batch_size):
+        batch = X_sub.iloc[i : i + batch_size]
+        print(f"Processing batch {i//batch_size + 1}/{(len(X_sub)-1)//batch_size + 1}...")
+        
+        # Calculate interactions for this batch only
+        batch_interactions = explainer.shap_interaction_values(batch)
+        
+        # Aggregate the absolute values into our global matrix
+        global_interaction_matrix += np.abs(batch_interactions).sum(axis=0)
+        
+        # Explicitly clean up memory
+        del batch_interactions
+        gc.collect()
+
+    # Final average
+    global_interaction_matrix /= len(X_sub)
+    
+    # 3. Extract and rank the interactions
+    interaction_dict = {}
+    for i in range(n_features):
+        for j in range(i + 1, n_features):
+            # SHAP interactions are symmetric; sum [i,j] and [j,i]
+            # Multiplied by 2 to capture the total pair effect
+            val = global_interaction_matrix[i, j] * 2
+            if val > 0:
+                pair_name = f"{feature_names[i]} * {feature_names[j]}"
+                interaction_dict[pair_name] = val
+
+    sorted_interactions = dict(sorted(interaction_dict.items(), key=lambda x: x[1], reverse=True))
+    
+    # Print the top interaction
+    if sorted_interactions:
+        top_pair = list(sorted_interactions.keys())[0]
+        print(f"Strongest Interaction: {top_pair} (Score: {sorted_interactions[top_pair]:.4f})")
+    
+    return sorted_interactions
+
 # ==========================================
 # 4. p-like values for SHAP importances
 # ==========================================
 
-def compute_shap_pvalues(X_train: pd.DataFrame, y_train: np.ndarray, 
+def compute_shap_pvalues(model: xgb.XGBRegressor, X_train: pd.DataFrame, y_train: np.ndarray, 
                          X_test: pd.DataFrame, true_shap_values: shap.Explanation, 
                          feature_names: list[str], n_permutations: int = 50) -> dict[str, float]:
     """
@@ -541,39 +845,29 @@ def compute_shap_pvalues(X_train: pd.DataFrame, y_train: np.ndarray,
     """
     print(f"\n--- Calculating Empirical SHAP p-values (Permutations: {n_permutations}) ---")
     
-    # 1. Get baseline (true) global SHAP importances
     true_importances = np.abs(true_shap_values.values).mean(axis=0)
-    
-    # 2. Initialize array to hold null importances
     null_importances = np.zeros((n_permutations, len(feature_names)))
     
-    # 3. Generate null distribution by breaking the relationship with y
+    # Extract exact hyperparameters from the base model
+    model_params = model.get_params()
+    
     for i in range(n_permutations):
-        # Shuffle target to destroy any real predictive signal
         y_train_shuffled = np.random.permutation(y_train)
         
-        # Train dummy model on shuffled data
-        null_model = xgb.XGBRegressor(n_estimators=100, max_depth=3, learning_rate=0.1, n_jobs=-1)
+        # Clone the model perfectly
+        null_model = xgb.XGBRegressor(**model_params)
         null_model.fit(X_train, y_train_shuffled)
         
-        # Compute SHAP for null model
         null_explainer = shap.TreeExplainer(null_model)
         null_shap_vals = null_explainer(X_test)
-        
-        # Store global importance for this permutation
         null_importances[i, :] = np.abs(null_shap_vals.values).mean(axis=0)
         
-    # 4. Calculate empirical p-values
     p_values = {}
     for idx, feat in enumerate(feature_names):
-        # How many times did pure noise generate a SHAP score higher than our real model?
         count_extreme = np.sum(null_importances[:, idx] >= true_importances[idx])
-        
-        # Formula for empirical p-value
         p_val = (count_extreme + 1) / (n_permutations + 1)
         p_values[feat] = p_val
         
-    # Sort features by p-value (lowest/most significant first)
     sorted_pvalues = dict(sorted(p_values.items(), key=lambda item: item[1]))
 
     print("\nSHAP Empirical P-values (< 0.05 is statistically significant):")
@@ -584,16 +878,13 @@ def compute_shap_pvalues(X_train: pd.DataFrame, y_train: np.ndarray,
         
     return sorted_pvalues
 
-def compute_shap_shadow_features(X_train: pd.DataFrame, y_train: np.ndarray, 
+def compute_shap_shadow_features(model: xgb.XGBRegressor, X_train: pd.DataFrame, y_train: np.ndarray, 
                                  X_test: pd.DataFrame, feature_names: list[str]) -> dict[str, bool]:
     """
     Uses shadow features to determine which SHAP values are statistically significant.
-    A feature is significant if its SHAP importance is greater than the max SHAP 
-    importance of any purely random shadow feature.
     """
     print("\n--- Running SHAP Shadow Feature Analysis ---")
     
-    # 1. Create Shadow Features (Shuffle each column independently)
     X_train_shadow = X_train.copy()
     X_test_shadow = X_test.copy()
     
@@ -602,31 +893,26 @@ def compute_shap_shadow_features(X_train: pd.DataFrame, y_train: np.ndarray,
     X_test_shadow.columns = shadow_names
     
     for col in shadow_names:
-        # Permute the columns to break relationships with y
         X_train_shadow[col] = np.random.permutation(X_train_shadow[col].values)
         X_test_shadow[col] = np.random.permutation(X_test_shadow[col].values)
         
-    # 2. Combine Real and Shadow Features
     X_train_extended = pd.concat([X_train, X_train_shadow], axis=1)
     X_test_extended = pd.concat([X_test, X_test_shadow], axis=1)
     
-    # 3. Train a single model on the extended dataset
-    shadow_model = xgb.XGBRegressor(n_estimators=100, max_depth=3, learning_rate=0.1, n_jobs=-1)
+    # Extract params and clone
+    model_params = model.get_params()
+    shadow_model = xgb.XGBRegressor(**model_params)
     shadow_model.fit(X_train_extended, y_train)
     
-    # 4. Compute SHAP values for all features (real + shadow)
     explainer = shap.TreeExplainer(shadow_model)
     shap_vals_extended = explainer(X_test_extended)
     
-    # 5. Calculate mean absolute global importances
     importances = np.abs(shap_vals_extended.values).mean(axis=0)
     importance_dict = dict(zip(X_train_extended.columns, importances))
     
-    # 6. Find the maximum importance among the shadow features
     max_shadow_importance = max([importance_dict[name] for name in shadow_names])
     print(f"Maximum Shadow Feature Importance (Noise Threshold): {max_shadow_importance:.4f}")
     
-    # 7. Evaluate real features against the threshold
     results = {}
     print("\nShadow Feature Significance Results:")
     for feat in feature_names:
@@ -640,47 +926,42 @@ def compute_shap_shadow_features(X_train: pd.DataFrame, y_train: np.ndarray,
     print("-" * 46 + "\n")
     return results
 
-def compute_shap_bootstrapping(X_train: pd.DataFrame, y_train: np.ndarray, 
+def compute_shap_bootstrapping(model: xgb.XGBRegressor, X_train: pd.DataFrame, y_train: np.ndarray, 
                                X_test: pd.DataFrame, feature_names: list[str], 
                                n_bootstraps: int = 50) -> dict[str, tuple[float, float, float]]:
     """
     Calculates 95% Confidence Intervals for SHAP feature importances using bootstrapping.
-    Returns a dict with format: {feature: (mean_importance, lower_bound, upper_bound)}
     """
     print(f"\n--- Running SHAP Bootstrapping Analysis (Iterations: {n_bootstraps}) ---")
     
-    # Array to hold global importances for each bootstrap
     bootstrap_importances = np.zeros((n_bootstraps, len(feature_names)))
     
+    # Extract params and clone
+    model_params = model.get_params()
+    
     for i in range(n_bootstraps):
-        # 1. Sample with replacement
         indices = np.random.choice(len(X_train), size=len(X_train), replace=True)
         X_train_boot = X_train.iloc[indices]
         y_train_boot = y_train[indices] if isinstance(y_train, np.ndarray) else y_train.iloc[indices]
         
-        # 2. Train model on bootstrap sample
-        boot_model = xgb.XGBRegressor(n_estimators=100, max_depth=3, learning_rate=0.1, n_jobs=-1)
+        # Clone the exact model configuration
+        boot_model = xgb.XGBRegressor(**model_params)
         boot_model.fit(X_train_boot, y_train_boot)
         
-        # 3. Compute SHAP on the CONSTANT test set
         boot_explainer = shap.TreeExplainer(boot_model)
         boot_shap_vals = boot_explainer(X_test)
         
-        # 4. Store global importance
         bootstrap_importances[i, :] = np.abs(boot_shap_vals.values).mean(axis=0)
         
-    # Calculate Confidence Intervals
     results = {}
     print("\nSHAP Bootstrapped 95% Confidence Intervals:")
     
-    # Calculate means to sort the output
     mean_importances = np.mean(bootstrap_importances, axis=0)
-    sorted_indices = np.argsort(mean_importances)[::-1] # Descending order
+    sorted_indices = np.argsort(mean_importances)[::-1]
     
     for idx in sorted_indices:
         feat = feature_names[idx]
         mean_val = mean_importances[idx]
-        # 2.5th and 97.5th percentiles give the 95% CI
         lower_bound = np.percentile(bootstrap_importances[:, idx], 2.5)
         upper_bound = np.percentile(bootstrap_importances[:, idx], 97.5)
         
@@ -698,20 +979,22 @@ def main():
     """Main execution pipeline."""
     # 1. Setup & Data Generation
     
-    # Normal Linear Data (Commented out as in original)
-    # X, y, feature_names = generate_linear_synthetic_data(
+    # # Normal Linear Data (Commented out as in original)
+    # X, y, feature_names, true_linear_weights = generate_linear_synthetic_data(
     #     num_inputs=10, 
     #     num_samples=5000, 
     #     num_contributing_features=(2, 5), 
+    #     input_range = (-1.0, 1.0),
     #     weight_range=(-3, 3),
     #     noise_std=0.05,
     # )
     
-    # With Interactions Data (Commented out as in original)
-    # X, y, feature_names = generate_synthetic_data_with_interactions(
+    # # With Interactions Data (Commented out as in original)
+    # X, y, feature_names, true_linear_weights, true_interaction_weights = generate_synthetic_data_with_interactions(
     #     num_inputs=10, 
     #     num_samples=5000, 
     #     num_contributing_features=(2, 5), 
+    #     input_range = (-1.0, 1.0),
     #     weight_range=(-3, 3),
     #     num_interactions=(1, 2),
     #     interaction_weight_range=(-3, 3),
@@ -719,17 +1002,20 @@ def main():
     # )
     
     # With Hidden Features
-    X, hidden_features, y, feature_names, hidden_feature_names = generate_synthetic_data_with_hidden_features(
+    X, hidden_features, y, feature_names, hidden_feature_names, true_linear_weights, true_interaction_weights = generate_synthetic_data_with_hidden_features(
         num_inputs = 10, 
         num_samples = 5000, 
         num_contributing_features = (2, 5), 
         num_hidden_features = (1, 2), 
+        input_range = (-1.0, 1.0),
         weight_range = (-3, 3), 
         num_interactions = (1, 2), 
         interaction_weight_range = (-3, 3), 
         noise_std = 0.05, 
         hidden_in_linear = True,           # Should hidden features have a linear impact?
         hidden_in_interactions = True,     # Should hidden features be part of interactions?
+        missing_pct = 0.0,                 # 00% of the data will be missing (NaN)
+        error_pct = 0.0,                   # 00% of the data will be corrupted
     )
 
     # Split data here so both OLS and XGBoost train on the exact same subsets
@@ -737,15 +1023,44 @@ def main():
     
     # 2. Traditional Baseline (OLS)
     ols_model, significant_features = perform_traditional_regression(X_train, y_train)
+
+    print("Testing Traditional Baseline (OLS):")
+    metrics = evaluate_feature_discovery(significant_features, true_linear_weights, true_interaction_weights)
     
     # 3. Machine Learning Modeling (XGBoost)
     # We pass the pre-split data directly to ensure apples-to-apples comparison
-    model = xgb.XGBRegressor(n_estimators=100, max_depth=3, learning_rate=0.1)
+    model = xgb.XGBRegressor(n_estimators=100, max_depth=3, learning_rate=0.1, base_score=np.mean(y_train))
     model.fit(X_train, y_train)
     
     # 4. Evaluation & XGBoost Native Importances
     evaluate_xgb_model(model, X_test, y_test)
     weight_importance, gain_importance, cover_importance = plot_all_xgb_importances(model)
+    
+    C = -0.5 # Adjust this constant to be more or less strict in filtering features based on standard deviation
+
+    significant_features = weight_importance
+    # get only values above the mean
+    significant_features = {k: v for k, v in significant_features.items() if v > np.mean(list(significant_features.values())) +C*np.std(list(significant_features.values()))}
+    significant_features 
+
+    print("Testing weight_importance:")
+    metrics = evaluate_feature_discovery(significant_features, true_linear_weights, true_interaction_weights)
+
+    significant_features = gain_importance
+    # get only values above the mean
+    significant_features = {k: v for k, v in significant_features.items() if v > np.mean(list(significant_features.values())) +C*np.std(list(significant_features.values()))}
+    significant_features 
+
+    print("Testing gain_importance:")
+    metrics = evaluate_feature_discovery(significant_features, true_linear_weights, true_interaction_weights)
+
+    significant_features = cover_importance
+    # get only values above the mean
+    significant_features = {k: v for k, v in significant_features.items() if v > np.mean(list(significant_features.values())) +C*np.std(list(significant_features.values()))}
+    significant_features 
+
+    print("Testing cover_importance:")
+    metrics = evaluate_feature_discovery(significant_features, true_linear_weights, true_interaction_weights)
     
     # 5. SHAP Explainability & Visualization
     print("Computing SHAP values...")
@@ -758,12 +1073,23 @@ def main():
     # 7. SHAP Feature Summary
     ranked_features = print_feature_importance(shap_values)
     
+    C = -0.5 # Adjust this constant to be more or less strict in filtering features based on standard deviation
+
+    significant_features = ranked_features
+    # get only values above the mean
+    significant_features = {k: v for k, v in significant_features.items() if v > np.mean(list(significant_features.values())) +C*np.std(list(significant_features.values()))}
+    significant_features 
+
+    print("Testing SHAP importance:")
+    metrics = evaluate_feature_discovery(significant_features, true_linear_weights, true_interaction_weights)
+    
     # ---------------------------------------------------------
     # NEW: SHAP STATISTICAL VALIDATION
     # ---------------------------------------------------------
 
     # 8. Statistical Significance of SHAP (Slow gold standard permutation test)
     shap_pvalues = compute_shap_pvalues(
+        model=model,
         X_train=X_train, 
         y_train=y_train, 
         X_test=X_test, 
@@ -771,17 +1097,37 @@ def main():
         feature_names=feature_names, 
         n_permutations=50 # Increase to 100 or 500 for more robust (but slower) results
     )
+    
+    p_threshold = 0.05 # Adjust this threshold to be more or less strict in filtering features based on p-values
+
+    significant_features = ranked_features
+    # get only values where p-value < p_threshold (e.g., 0.05)
+    significant_features = {k: v for k, v in significant_features.items() if shap_pvalues.get(k, 1.0) < p_threshold}
+    significant_features 
+
+    print("Testing SHAP importance:")
+    metrics = evaluate_feature_discovery(significant_features, true_linear_weights, true_interaction_weights)
 
     # 9. SHAP Shadow Feature Analysis (Extremely Fast)
     shadow_results = compute_shap_shadow_features(
+        model=model,
         X_train=X_train, 
         y_train=y_train, 
         X_test=X_test, 
         feature_names=feature_names
     )
 
+    significant_features = ranked_features
+    # get only values where shadow_results indicate significance (e.g., shadow_results[f] == True)
+    significant_features = {k: v for k, v in significant_features.items() if shadow_results.get(k, False)}
+    significant_features 
+
+    print("Testing SHAP importance:")
+    metrics = evaluate_feature_discovery(significant_features, true_linear_weights, true_interaction_weights)
+
     # 10. SHAP Bootstrapping / Confidence Intervals (Shows Stability)
     bootstrap_results = compute_shap_bootstrapping(
+        model=model,
         X_train=X_train, 
         y_train=y_train, 
         X_test=X_test, 
