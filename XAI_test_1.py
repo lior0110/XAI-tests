@@ -775,7 +775,7 @@ def analyze_shap_interactions(model: xgb.XGBRegressor, X_test: pd.DataFrame, fea
 
 
 
-def analyze_shap_interactions_memory_efficient(model, X_test, feature_names, max_samples=500, batch_size=50):
+def analyze_shap_interactions_memory_efficient(model: xgb.XGBRegressor, X_test: pd.DataFrame, feature_names: list[str], max_samples: int=500, batch_size: int=50)-> dict[str, float]:
     """
     Memory-efficient SHAP interaction analysis using batching and subsampling.
     """
@@ -832,6 +832,79 @@ def analyze_shap_interactions_memory_efficient(model, X_test, feature_names, max
         print(f"Strongest Interaction: {top_pair} (Score: {sorted_interactions[top_pair]:.4f})")
     
     return sorted_interactions
+
+def analyze_shap_interactions_with_early_stop(model: xgb.XGBRegressor, X_test: pd.DataFrame, feature_names: list[str], 
+                                             batch_size: int=50, limit: float=1e-4, plimit: float=0.01, 
+                                             min_batches: int=3, max_samples: int=2000)-> dict[str, float]:
+    """
+    Computes SHAP interactions in batches with early stopping.
+    
+    Args:
+        limit: The tolerance for early stopping. If max change < limit, stop.
+        plimit: The tolerance for percentage change for early stopping.
+        min_batches: Minimum number of batches to process before checking limit.
+        max_samples: Absolute cap on samples to prevent infinite loops.
+    """
+    print(f"\n--- Computing SHAP Interactions (Early Stopping @ limit={limit}, plimit={plimit}) ---")
+    
+    explainer = shap.TreeExplainer(model)
+    n_features = len(feature_names)
+    
+    # Track the running sum and the previous mean matrix
+    running_sum_matrix = np.zeros((n_features, n_features))
+    prev_mean_matrix = None
+    
+    total_samples_processed = 0
+    X_sub = X_test.sample(n=min(len(X_test), max_samples), random_state=42)
+    
+    for i in range(0, len(X_sub), batch_size):
+        batch = X_sub.iloc[i : i + batch_size]
+        batch_size_actual = len(batch)
+        
+        # 1. Calculate interactions for this batch
+        # Result is (batch_size, n_features, n_features)
+        batch_interactions = explainer.shap_interaction_values(batch)
+        
+        # 2. Update global accumulation (use absolute values for importance)
+        running_sum_matrix += np.abs(batch_interactions).sum(axis=0)
+        total_samples_processed += batch_size_actual
+        
+        # 3. Calculate current mean matrix
+        current_mean_matrix = running_sum_matrix / total_samples_processed
+        
+        # 4. Check for Convergence (Early Stopping)
+        batch_idx = (i // batch_size) + 1
+        if prev_mean_matrix is not None:
+            # Calculate the maximum change in any single interaction pair
+            diff = np.max(np.abs(current_mean_matrix - prev_mean_matrix))
+            print(f"Batch {batch_idx}: Max Change = {diff:.6f}")
+            # Calculate the maximum change in % in any single interaction pair
+            pct_diff = np.max(np.abs(current_mean_matrix - prev_mean_matrix) / (np.abs(prev_mean_matrix) + 1e-10))
+            print(f"Batch {batch_idx}: Max % Change = {pct_diff:.4%}")
+
+            
+            if (diff < limit or pct_diff < plimit) and batch_idx >= min_batches:
+                print(f"Convergence reached! Stopping early at {total_samples_processed} samples.")
+                break
+        else:
+            print(f"Batch {batch_idx}: Initializing baseline...")
+
+        prev_mean_matrix = current_mean_matrix.copy()
+        
+        # Clean memory explicitly
+        del batch_interactions
+        gc.collect()
+
+    # --- Result Extraction ---
+    interaction_dict = {}
+    for i in range(n_features):
+        for j in range(i + 1, n_features):
+            val = current_mean_matrix[i, j] * 2 # Symmetric pair sum
+            if val > 0:
+                interaction_dict[f"{feature_names[i]} * {feature_names[j]}"] = val
+
+    return dict(sorted(interaction_dict.items(), key=lambda x: x[1], reverse=True))
+
 
 # ==========================================
 # 4. p-like values for SHAP importances
