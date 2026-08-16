@@ -283,6 +283,157 @@ def generate_synthetic_data_with_hidden_features(
     
     return X_visible, X_hidden, y, visible_feature_names, hidden_feature_names, true_linear_weights, true_interaction_weights
 
+
+def generate_synthetic_data_with_complex_features(
+    num_inputs: int = 10, 
+    num_samples: int = 5000, 
+    num_contributing_features: tuple[int, int] = (2, 5), 
+    num_hidden_features: tuple[int, int] = (1, 2), 
+    weight_range: tuple[float, float] = (-3.0, 3.0), 
+    shift_range: tuple[float, float] = (-2.0, 2.0),
+    num_interactions: tuple[int, int] = (1, 2), 
+    num_poly_features: tuple[int, int] = (1, 2),      
+    num_v_shaped_features: tuple[int, int] = (1, 2),   
+    interaction_weight_range: tuple[float, float] = (-3.0, 3.0), 
+    noise_std: float = 0.05, 
+    hidden_in_linear: bool = True,
+    hidden_in_interactions: bool = True,
+    hidden_in_nonlinear: bool = True,
+    input_range: tuple[float, float] = (-1.0, 1.0),
+    missing_pct: float = 0.0,
+    error_pct: float = 0.0
+):
+    """Generates synthetic data, prints the full true equation, and returns isolated ground truth metadata."""
+    
+    n_hidden_total = np.random.randint(num_hidden_features[0], num_hidden_features[1] + 1)
+    total_features_dataset = num_inputs + n_hidden_total
+    
+    def get_feat_name(idx):
+        return f"Feature_{idx}" if idx < num_inputs else f"Hidden_{idx - num_inputs}"
+
+    def sample_indices(count, include_hidden):
+        if include_hidden and n_hidden_total > 0:
+            return np.random.choice(total_features_dataset, count, replace=False)
+        return np.random.choice(num_inputs, count, replace=False)
+
+    full_feature_names = [get_feat_name(i) for i in range(total_features_dataset)]
+    X_full = pd.DataFrame(
+        np.random.uniform(input_range[0], input_range[1], (num_samples, total_features_dataset)),
+        columns=full_feature_names
+    )
+
+    domain_min, domain_max = input_range
+    midpoint = (domain_min + domain_max) / 2.0
+    domain_span = domain_max - domain_min
+
+    global_intercept = np.random.uniform(shift_range[0], shift_range[1])
+    y = np.full(num_samples, global_intercept)
+    equation_parts = [f"{global_intercept:.4f}"]
+    
+    # Ground truth structures
+    ground_truth = {
+        "global_intercept": float(global_intercept),
+        "linear": {},         # {feat_name: {"weight": w, "shift": s}}
+        "poly": {},           # {feat_name: {"weight": w, "center": c, "shift": s}}
+        "v_shaped": {},       # {feat_name: {"weight": w, "center": c, "shift": s}}
+        "interactions": []    # [{"features": (f1, f2), "weight": w, "shift": s}]
+    }
+
+    # 1. Linear Terms
+    total_linear = np.random.randint(num_contributing_features[0], num_contributing_features[1] + 1)
+    linear_indices = sample_indices(total_linear, hidden_in_linear)
+    linear_weights = np.random.uniform(weight_range[0], weight_range[1], total_linear)
+
+    for idx, w in zip(linear_indices, linear_weights):
+        name = get_feat_name(idx)
+        shift = np.random.uniform(shift_range[0], shift_range[1])
+        y += (w * X_full[name] + shift)
+        equation_parts.append(f"({w:.4f} * {name} + {shift:.4f})")
+        
+        ground_truth["linear"][name] = {"weight": float(w), "shift": float(shift)}
+
+    # 2. Interaction Terms
+    n_interactions = np.random.randint(num_interactions[0], num_interactions[1] + 1)
+    for _ in range(n_interactions):
+        pair = sorted(sample_indices(2, hidden_in_interactions))
+        feat_i, feat_j = get_feat_name(pair[0]), get_feat_name(pair[1])
+        w = np.random.uniform(interaction_weight_range[0], interaction_weight_range[1])
+        shift = np.random.uniform(shift_range[0], shift_range[1])
+        
+        y += (w * X_full[feat_i] * X_full[feat_j] + shift)
+        equation_parts.append(f"({w:.4f} * {feat_i} * {feat_j} + {shift:.4f})")
+        
+        ground_truth["interactions"].append({
+            "features": (feat_i, feat_j),
+            "weight": float(w),
+            "shift": float(shift)
+        })
+
+    # 3. Polynomial Terms
+    n_poly = np.random.randint(num_poly_features[0], num_poly_features[1] + 1)
+    poly_indices = sample_indices(n_poly, hidden_in_nonlinear)
+    poly_raw_weights = np.random.uniform(weight_range[0], weight_range[1], n_poly)
+
+    for idx, w_raw in zip(poly_indices, poly_raw_weights):
+        name = get_feat_name(idx)
+        center = midpoint + np.random.uniform(-0.02 * domain_span, 0.02 * domain_span)
+        shift = np.random.uniform(shift_range[0], shift_range[1])
+        w_scaled = np.sign(w_raw) * np.sqrt(np.abs(w_raw))
+        
+        y += (w_scaled * np.square(X_full[name] - center) + shift)
+        equation_parts.append(f"({w_scaled:.4f} * ({name} - {center:.2f})^2 + {shift:.4f})")
+        
+        ground_truth["poly"][name] = {
+            "weight": float(w_scaled), 
+            "center": float(center), 
+            "shift": float(shift)
+        }
+
+    # 4. V-Shaped Terms
+    n_v = np.random.randint(num_v_shaped_features[0], num_v_shaped_features[1] + 1)
+    v_indices = sample_indices(n_v, hidden_in_nonlinear)
+    v_weights = np.random.uniform(weight_range[0], weight_range[1], n_v)
+
+    for idx, w in zip(v_indices, v_weights):
+        name = get_feat_name(idx)
+        center = midpoint + np.random.uniform(-0.02 * domain_span, 0.02 * domain_span)
+        shift = np.random.uniform(shift_range[0], shift_range[1])
+        
+        y += (w * np.abs(X_full[name] - center) + shift)
+        equation_parts.append(f"({w:.4f} * |{name} - {center:.2f}| + {shift:.4f})")
+        
+        ground_truth["v_shaped"][name] = {
+            "weight": float(w), 
+            "center": float(center), 
+            "shift": float(shift)
+        }
+
+    # Add Target Noise
+    y += np.random.normal(0, noise_std, num_samples)
+
+    # Print Equation Details
+    print("--- Generative Model Info ---")
+    print(f"Linear: {total_linear} | Interactions: {n_interactions} | Poly: {n_poly} | V-shaped: {n_v}")
+    print("\n--- True Equation ---")
+    print("y = " + " + ".join(equation_parts) + f" + Noise(0, {noise_std})\n")
+
+    # Corrupt Inputs
+    total_cells = num_samples * total_features_dataset
+    num_missing, num_error = int(total_cells * missing_pct), int(total_cells * error_pct)
+    if num_missing > 0 or num_error > 0:
+        X_arr = X_full.to_numpy().copy()
+        corrupt_indices = np.random.choice(total_cells, num_missing + num_error, replace=False)
+        if num_missing > 0:
+            X_arr.flat[corrupt_indices[:num_missing]] = np.nan
+        if num_error > 0:
+            X_arr.flat[corrupt_indices[num_missing:]] = np.random.uniform(input_range[0], input_range[1], num_error)
+        X_full = pd.DataFrame(X_arr, columns=full_feature_names)
+
+    X_visible = X_full[[f"Feature_{i}" for i in range(num_inputs)]].copy()
+    X_hidden = X_full[[f"Hidden_{i}" for i in range(n_hidden_total)]].copy()
+
+    return X_visible, X_hidden, y, ground_truth
+
 # ==========================================
 # 2. MODELING & EVALUATION FUNCTIONS
 # ==========================================
@@ -437,128 +588,228 @@ def evaluate_xgb_model(model: xgb.XGBRegressor, X_test: pd.DataFrame, y_test: np
     print(f"Mean Absolute Error (MAE):      {mae:.4f}")
     print("-" * 37 + "\n")
 
+# def evaluate_feature_discovery(
+#     significant_features: dict | list | str, 
+#     true_linear_weights: dict[str, float], 
+#     true_interaction_weights: dict[str, float | list[float]]
+# ) -> dict:
+#     """
+#     Evaluates how well the ML model discovered the true generative features.
+#     Provides separate recall metrics for linear vs. interaction features.
+#     """
+#     def _extract_score(val):
+#         try:
+#             if isinstance(val, dict):
+#                 for k in ['importance', 'score', 'shap_value', 'weight', 'mean_abs_shap']:
+#                     if k in val: return float(val[k])
+#                 return float(list(val.values())[0])
+#             elif isinstance(val, (list, tuple, np.ndarray)):
+#                 return float(val[0])
+#             return float(val)
+#         except Exception:
+#             return 1.0
+
+#     # 1. Standardize Model Output
+#     if isinstance(significant_features, str):
+#         model_features = [f.strip() for f in significant_features.split(',')]
+#         model_importances = {f: 1.0 for f in model_features}
+#     elif isinstance(significant_features, list):
+#         model_features = significant_features
+#         model_importances = {f: 1.0 for f in model_features}
+#     elif isinstance(significant_features, dict):
+#         model_features = list(significant_features.keys())
+#         model_importances = significant_features
+#     else:
+#         raise ValueError("significant_features must be a dict, list, or string.")
+        
+#     # 2. Extract Ground Truth Sets (Excluding Hidden Features)
+#     true_linear_set = {f for f in true_linear_weights.keys() if not f.startswith("Hidden")}
+#     true_interaction_set = {f for f in true_interaction_weights.keys() if not f.startswith("Hidden")}
+    
+#     true_features_set = true_linear_set.union(true_interaction_set)
+#     model_features_set = set(model_features)
+    
+#     # 3. Calculate Global Metrics
+#     true_positives = true_features_set.intersection(model_features_set)
+#     false_positives = model_features_set - true_features_set
+#     false_negatives = true_features_set - model_features_set
+    
+#     tp_count = len(true_positives)
+#     fp_count = len(false_positives)
+#     fn_count = len(false_negatives)
+    
+#     precision = tp_count / len(model_features_set) if len(model_features_set) > 0 else 0.0
+#     recall_overall = tp_count / len(true_features_set) if len(true_features_set) > 0 else 0.0
+#     f1_score = 2 * (precision * recall_overall) / (precision + recall_overall) if (precision + recall_overall) > 0 else 0.0
+    
+#     # 4. Calculate Specific Recalls (Linear vs Interaction)
+#     linear_hits = true_linear_set.intersection(model_features_set)
+#     interaction_hits = true_interaction_set.intersection(model_features_set)
+    
+#     # If there are no linear/interaction features in the ground truth, we consider recall to be N/A (1.0)
+#     recall_linear = len(linear_hits) / len(true_linear_set) if len(true_linear_set) > 0 else 1.0
+#     recall_interaction = len(interaction_hits) / len(true_interaction_set) if len(true_interaction_set) > 0 else 1.0
+
+#     # 5. Calculate Aggregate True Weights (For Ranking Analysis)
+#     true_aggregate_importance = {}
+#     for f in true_features_set:
+#         imp = 0.0
+#         if f in true_linear_weights:
+#             imp += abs(true_linear_weights[f])
+#         if f in true_interaction_weights:
+#             w_int = true_interaction_weights[f]
+#             if isinstance(w_int, list):
+#                 imp += sum(abs(x) for x in w_int)
+#             else:
+#                 imp += abs(w_int)
+#         true_aggregate_importance[f] = imp
+        
+#     # 6. Rank Correlation (Spearman)
+#     correlation, p_value = None, None
+#     if isinstance(significant_features, dict) and len(true_positives) > 1:
+#         shared_features = list(true_positives)
+#         true_scores = [true_aggregate_importance[f] for f in shared_features]
+#         model_scores = [abs(_extract_score(model_importances[f])) for f in shared_features]
+        
+#         if len(set(model_scores)) == 1:
+#              model_scores = [s + np.random.normal(0, 1e-10) for s in model_scores]
+
+#         correlation, p_value = spearmanr(true_scores, model_scores)
+
+#     # 7. Print Summary
+#     print("\n" + "="*50)
+#     print("           FEATURE DISCOVERY EVALUATION")
+#     print("="*50)
+#     print(f"Total True (Visible) Features: {len(true_features_set)}")
+#     print(f"  ├─ Purely Linear / Main:     {len(true_linear_set)}")
+#     print(f"  └─ Involved in Interactions: {len(true_interaction_set)}")
+#     print(f"Total Model Features Found:    {len(model_features_set)}")
+#     print("-" * 50)
+#     print(f"True Positives (Correct): {tp_count} -> {list(true_positives)}")
+#     print(f"False Positives (Noise):  {fp_count} -> {list(false_positives)}")
+#     print(f"False Negatives (Missed): {fn_count} -> {list(false_negatives)}")
+#     print("-" * 50)
+#     print(f"Precision:            {precision:.4f}")
+#     print(f"Overall Recall:       {recall_overall:.4f}")
+#     print(f"  ├─ Linear Recall:   {recall_linear:.4f}  (Found {len(linear_hits)}/{len(true_linear_set)})")
+#     print(f"  └─ Interact Recall: {recall_interaction:.4f}  (Found {len(interaction_hits)}/{len(true_interaction_set)})")
+#     print(f"F1-Score:             {f1_score:.4f}")
+    
+#     if correlation is not None:
+#         print(f"Rank Correlation:     {correlation:.4f} (p-val: {p_value:.4f})")
+#     print("="*50 + "\n")
+
+#     return {
+#         "precision": precision,
+#         "recall_overall": recall_overall,
+#         "recall_linear": recall_linear,
+#         "recall_interaction": recall_interaction,
+#         "f1_score": f1_score,
+#         "true_positives": list(true_positives),
+#         "false_positives": list(false_positives),
+#         "false_negatives": list(false_negatives),
+#         "spearman_correlation": correlation
+#     }
+
 def evaluate_feature_discovery(
-    significant_features: dict | list | str, 
-    true_linear_weights: dict[str, float], 
-    true_interaction_weights: dict[str, float | list[float]]
+    detected_features: list[str] | set[str] | dict,
+    ground_truth: dict,
+    evaluated_features: list[str] | None = None
 ) -> dict:
-    """
-    Evaluates how well the ML model discovered the true generative features.
-    Provides separate recall metrics for linear vs. interaction features.
-    """
-    def _extract_score(val):
-        try:
-            if isinstance(val, dict):
-                for k in ['importance', 'score', 'shap_value', 'weight', 'mean_abs_shap']:
-                    if k in val: return float(val[k])
-                return float(list(val.values())[0])
-            elif isinstance(val, (list, tuple, np.ndarray)):
-                return float(val[0])
-            return float(val)
-        except Exception:
-            return 1.0
+    """Evaluates feature discovery overall and per-category, strictly omitting hidden features."""
 
-    # 1. Standardize Model Output
-    if isinstance(significant_features, str):
-        model_features = [f.strip() for f in significant_features.split(',')]
-        model_importances = {f: 1.0 for f in model_features}
-    elif isinstance(significant_features, list):
-        model_features = significant_features
-        model_importances = {f: 1.0 for f in model_features}
-    elif isinstance(significant_features, dict):
-        model_features = list(significant_features.keys())
-        model_importances = significant_features
+    # 1. Parse detected features from dict, list, set, or array
+    if isinstance(detected_features, dict):
+        raw_detected = set(detected_features.keys())
+    elif isinstance(detected_features, (list, tuple, set, np.ndarray)):
+        raw_detected = set(detected_features)
     else:
-        raise ValueError("significant_features must be a dict, list, or string.")
-        
-    # 2. Extract Ground Truth Sets (Excluding Hidden Features)
-    true_linear_set = {f for f in true_linear_weights.keys() if not f.startswith("Hidden")}
-    true_interaction_set = {f for f in true_interaction_weights.keys() if not f.startswith("Hidden")}
-    
-    true_features_set = true_linear_set.union(true_interaction_set)
-    model_features_set = set(model_features)
-    
-    # 3. Calculate Global Metrics
-    true_positives = true_features_set.intersection(model_features_set)
-    false_positives = model_features_set - true_features_set
-    false_negatives = true_features_set - model_features_set
-    
-    tp_count = len(true_positives)
-    fp_count = len(false_positives)
-    fn_count = len(false_negatives)
-    
-    precision = tp_count / len(model_features_set) if len(model_features_set) > 0 else 0.0
-    recall_overall = tp_count / len(true_features_set) if len(true_features_set) > 0 else 0.0
-    f1_score = 2 * (precision * recall_overall) / (precision + recall_overall) if (precision + recall_overall) > 0 else 0.0
-    
-    # 4. Calculate Specific Recalls (Linear vs Interaction)
-    linear_hits = true_linear_set.intersection(model_features_set)
-    interaction_hits = true_interaction_set.intersection(model_features_set)
-    
-    # If there are no linear/interaction features in the ground truth, we consider recall to be N/A (1.0)
-    recall_linear = len(linear_hits) / len(true_linear_set) if len(true_linear_set) > 0 else 1.0
-    recall_interaction = len(interaction_hits) / len(true_interaction_set) if len(true_interaction_set) > 0 else 1.0
+        raise ValueError("detected_features must be a list, set, dict, or numpy array.")
 
-    # 5. Calculate Aggregate True Weights (For Ranking Analysis)
-    true_aggregate_importance = {}
-    for f in true_features_set:
-        imp = 0.0
-        if f in true_linear_weights:
-            imp += abs(true_linear_weights[f])
-        if f in true_interaction_weights:
-            w_int = true_interaction_weights[f]
-            if isinstance(w_int, list):
-                imp += sum(abs(x) for x in w_int)
-            else:
-                imp += abs(w_int)
-        true_aggregate_importance[f] = imp
-        
-    # 6. Rank Correlation (Spearman)
-    correlation, p_value = None, None
-    if isinstance(significant_features, dict) and len(true_positives) > 1:
-        shared_features = list(true_positives)
-        true_scores = [true_aggregate_importance[f] for f in shared_features]
-        model_scores = [abs(_extract_score(model_importances[f])) for f in shared_features]
-        
-        if len(set(model_scores)) == 1:
-             model_scores = [s + np.random.normal(0, 1e-10) for s in model_scores]
+    # Helper filter: Exclude 'Hidden_' features and any feature outside evaluated_features
+    def is_visible(feat_name: str) -> bool:
+        if feat_name.startswith("Hidden_"):
+            return False
+        if evaluated_features is not None and feat_name not in evaluated_features:
+            return False
+        return True
 
-        correlation, p_value = spearmanr(true_scores, model_scores)
+    # 2. Filter detected features
+    detected_set = {f for f in raw_detected if is_visible(f)}
 
-    # 7. Print Summary
-    print("\n" + "="*50)
-    print("           FEATURE DISCOVERY EVALUATION")
-    print("="*50)
-    print(f"Total True (Visible) Features: {len(true_features_set)}")
-    print(f"  ├─ Purely Linear / Main:     {len(true_linear_set)}")
-    print(f"  └─ Involved in Interactions: {len(true_interaction_set)}")
-    print(f"Total Model Features Found:    {len(model_features_set)}")
-    print("-" * 50)
-    print(f"True Positives (Correct): {tp_count} -> {list(true_positives)}")
-    print(f"False Positives (Noise):  {fp_count} -> {list(false_positives)}")
-    print(f"False Negatives (Missed): {fn_count} -> {list(false_negatives)}")
-    print("-" * 50)
-    print(f"Precision:            {precision:.4f}")
-    print(f"Overall Recall:       {recall_overall:.4f}")
-    print(f"  ├─ Linear Recall:   {recall_linear:.4f}  (Found {len(linear_hits)}/{len(true_linear_set)})")
-    print(f"  └─ Interact Recall: {recall_interaction:.4f}  (Found {len(interaction_hits)}/{len(true_interaction_set)})")
-    print(f"F1-Score:             {f1_score:.4f}")
-    
-    if correlation is not None:
-        print(f"Rank Correlation:     {correlation:.4f} (p-val: {p_value:.4f})")
-    print("="*50 + "\n")
-
-    return {
-        "precision": precision,
-        "recall_overall": recall_overall,
-        "recall_linear": recall_linear,
-        "recall_interaction": recall_interaction,
-        "f1_score": f1_score,
-        "true_positives": list(true_positives),
-        "false_positives": list(false_positives),
-        "false_negatives": list(false_negatives),
-        "spearman_correlation": correlation
+    # 3. Extract and filter ground truth categories
+    cat_true = {
+        "linear": {f for f in ground_truth.get("linear", {}).keys() if is_visible(f)},
+        "poly": {f for f in ground_truth.get("poly", {}).keys() if is_visible(f)},
+        "v_shaped": {f for f in ground_truth.get("v_shaped", {}).keys() if is_visible(f)},
+        "interactions": {
+            f for item in ground_truth.get("interactions", [])
+            for f in item.get("features", ()) if is_visible(f)
+        }
     }
+
+    all_true_features = set().union(*cat_true.values())
+
+    # 4. Helper metric calculator
+    def calc_metrics(tp_count, fp_count, fn_count):
+        prec = tp_count / (tp_count + fp_count) if (tp_count + fp_count) > 0 else 0.0
+        rec = tp_count / (tp_count + fn_count) if (tp_count + fn_count) > 0 else 0.0
+        f1_val = (2 * prec * rec) / (prec + rec) if (prec + rec) > 0 else 0.0
+        return prec, rec, f1_val
+
+    # 5. Overall Evaluation
+    tp_overall = detected_set.intersection(all_true_features)
+    fp_overall = detected_set - all_true_features
+    fn_overall = all_true_features - detected_set
+
+    prec_all, rec_all, f1_all = calc_metrics(len(tp_overall), len(fp_overall), len(fn_overall))
+
+    results = {
+        "overall": {
+            "precision": prec_all,
+            "recall": rec_all,
+            "f1": f1_all,
+            "true_positives": sorted(list(tp_overall)),
+            "false_positives": sorted(list(fp_overall)),
+            "false_negatives": sorted(list(fn_overall))
+        },
+        "categories": {}
+    }
+
+    print("==================================================")
+    print("        FEATURE DISCOVERY EVALUATION             ")
+    print("==================================================")
+    print(f"Overall Precision : {prec_all:.4f} ({len(tp_overall)}/{len(tp_overall) + len(fp_overall)})")
+    print(f"Overall Recall    : {rec_all:.4f} ({len(tp_overall)}/{len(tp_overall) + len(fn_overall)})")
+    print(f"Overall F1-Score  : {f1_all:.4f}")
+    print(f"False Positives   : {sorted(list(fp_overall))}")
+
+    # 6. Category-by-Category Evaluation
+    print("\n---------------- Category Breakdown --------------")
+    for cat_name, true_set in cat_true.items():
+        tp_cat = detected_set.intersection(true_set)
+        fn_cat = true_set - detected_set
+        
+        # Category Precision = TP_cat / total detected features
+        prec_cat, rec_cat, f1_cat = calc_metrics(len(tp_cat), len(fp_overall), len(fn_cat))
+
+        results["categories"][cat_name] = {
+            "precision": prec_cat,
+            "recall": rec_cat,
+            "f1": f1_cat,
+            "true_features": sorted(list(true_set)),
+            "detected_features": sorted(list(tp_cat)),
+            "missed_features": sorted(list(fn_cat))
+        }
+
+        print(f"\n[{cat_name.upper()}]")
+        print(f"  True Features     : {sorted(list(true_set))}")
+        print(f"  Detected          : {sorted(list(tp_cat))}")
+        print(f"  Missed            : {sorted(list(fn_cat))}")
+        print(f"  Recall            : {rec_cat:.4f} ({len(tp_cat)}/{len(true_set)})")
+
+    print("==================================================\n")
+    return results
 
 # ==========================================
 # 3. PLOTTING & SHAP EXPLAINABILITY FUNCTIONS
