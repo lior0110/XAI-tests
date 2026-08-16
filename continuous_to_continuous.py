@@ -256,7 +256,7 @@ def generate_synthetic_data_with_hidden_features(
     num_error = int(total_cells * error_pct)
     
     if num_missing > 0 or num_error > 0:
-        X_arr = X_full.to_numpy()
+        X_arr = X_full.to_numpy().copy()
         
         # Pick random distinct locations to corrupt
         corrupt_indices = np.random.choice(total_cells, num_missing + num_error, replace=False)
